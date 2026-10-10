@@ -1,0 +1,11 @@
+# FlamFetch — fire and glitch system fetch
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.tar.gz
+pkg/
+src/
