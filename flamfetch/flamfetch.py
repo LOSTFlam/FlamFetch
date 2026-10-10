@@ -234,36 +234,216 @@ def get_ip() -> str | None:
         return None
 
 
+def get_gpu() -> list[str]:
+    """Возвращает список GPU (NVIDIA + AMD и т.д.)."""
+    out = _run(["lspci"])
+    if not out:
+        return []
+    gpus = []
+    for line in out.splitlines():
+        low = line.lower()
+        if "vga" in low or "3d controller" in low or "display controller" in low:
+            # берём имя после ': '
+            name = line.split(": ", 1)[-1].strip()
+            # чистим от мусора
+            for junk in ("(rev a1)", "(rev c6)", "Corporation", "Advanced Micro Devices, Inc."):
+                name = name.replace(junk, "")
+            name = " ".join(name.split())
+            # короткое имя
+            name = name.replace("[AMD/ATI]", "").strip()
+            if name:
+                gpus.append(name)
+    return gpus
+
+
+def get_temps() -> dict[str, float]:
+    """Температуры CPU/GPU в °C."""
+    temps = {}
+    # k10temp (AMD)
+    out = _run(["sensors"])
+    if out:
+        for line in out.splitlines():
+            if ":" in line and "°C" in line:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    label = parts[0].strip()
+                    try:
+                        val = float(parts[1].strip().split("°")[0].replace("+", ""))
+                        temps[label] = val
+                    except ValueError:
+                        pass
+    # fallback через sysfs
+    if not temps:
+        for z in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
+            t = _read(str(z / "temp"))
+            typ = _read(str(z / "type")) or "temp"
+            if t:
+                try:
+                    temps[typ] = int(t) / 1000
+                except ValueError:
+                    pass
+    return temps
+
+
+def get_terminal() -> str:
+    term = os.environ.get("TERM_PROGRAM", "")
+    if term:
+        return term
+    # fallback по процессу
+    try:
+        ppid = os.getppid()
+        comm = _read(f"/proc/{ppid}/comm")
+        if comm:
+            return comm
+    except Exception:
+        pass
+    return os.environ.get("TERM", "?")
+
+
+def get_distro_icon() -> str:
+    """Иконка дистрибутива (nerd font)."""
+    osrel = _read("/etc/os-release")
+    distro = ""
+    if osrel:
+        for line in osrel.splitlines():
+            if line.startswith("ID="):
+                distro = line.split("=", 1)[1].strip('"').lower()
+                break
+    icons = {
+        "arch": "",
+        "endeavouros": "",
+        "manjaro": "",
+        "omarchy": "",
+        "ubuntu": "",
+        "debian": "",
+        "fedora": "",
+        "nixos": "",
+        "gentoo": "",
+        "void": "",
+    }
+    return icons.get(distro, "󰣇")
+
+
+# ---------------------------------------------------------------- прогресс-бары
+
+BAR_FILLED = "━"      # ━
+BAR_EMPTY = "─"       # ─
+
+
+def bar(pct: float, width: int = 10) -> str:
+    """Прогресс-бар с цветом по загрузке: зелёный/жёлтый/красный."""
+    pct = max(0.0, min(100.0, pct))
+    filled = int(pct / 100 * width)
+    bar_str = BAR_FILLED * filled + BAR_EMPTY * (width - filled)
+    # цвет по загрузке
+    if pct < 50:
+        color = 78      # зелёный
+    elif pct < 80:
+        color = 220     # жёлтый
+    else:
+        color = 196     # красный
+    return fg(color) + bar_str + RESET
+
+
 # ============================================================ разделы
+
+def _parse_mem() -> tuple[float, float, float]:
+    """(used, total, pct) в GiB."""
+    info = _read("/proc/meminfo")
+    if not info:
+        return 0.0, 0.0, 0.0
+    vals = {}
+    for line in info.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            vals[parts[0].rstrip(":")] = int(parts[1])
+    total = vals.get("MemTotal", 0) / 1024 / 1024
+    avail = vals.get("MemAvailable", 0) / 1024 / 1024
+    used = total - avail
+    pct = 100 * used / total if total else 0.0
+    return used, total, pct
+
+
+def _parse_disk(path: str = "/") -> tuple[float, float, float]:
+    """(used, total, pct) в GiB."""
+    try:
+        usage = shutil.disk_usage(path)
+        total = usage.total / 1024 ** 3
+        used = usage.used / 1024 ** 3
+        pct = 100 * used / total if total else 0.0
+        return used, total, pct
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
+def _parse_battery() -> tuple[int, str] | None:
+    """(percent, status) или None."""
+    for b in Path("/sys/class/power_supply").glob("BAT*"):
+        cap = _read(str(b / "capacity"))
+        status = _read(str(b / "status")) or ""
+        if cap:
+            try:
+                return int(cap), status
+            except ValueError:
+                return None
+    return None
+
 
 def build_sections() -> list[tuple[str, list[tuple[str, str]]]]:
     """Возвращает [(заголовок, [(ключ, значение), ...]), ...]"""
     host, os_name = get_host()
+    icon = get_distro_icon()
+    user = os.environ.get("USER", "user")
+    title = f"{user}@{host}"
+
+    # температура CPU
+    temps = get_temps()
+    cpu_temp = None
+    for label, val in temps.items():
+        if any(x in label.lower() for x in ("tctl", "cpu", "core", "k10temp", "temp1")):
+            cpu_temp = val
+            break
+    if cpu_temp is None and temps:
+        cpu_temp = next(iter(temps.values()))
+
+    # батарея
+    bat = _parse_battery()
+    # память / диск
+    mu, mt, mpct = _parse_mem()
+    du, dt, dpct = _parse_disk("/")
+
     sections = [
         ("◈ Система", [
-            ("OS", os_name),
+            ("OS", f"{icon} {os_name}"),
             ("Host", host),
             ("Kernel", get_kernel()),
             ("Uptime", get_uptime()),
         ]),
         ("◈ Оборудование", [
             ("CPU", get_cpu()),
+            ("GPU", get_gpu()[0] if get_gpu() else "?"),
             ("DE", get_de()),
+            ("Terminal", get_terminal()),
             ("Shell", get_shell()),
         ]),
         ("◈ Ресурсы", [
-            ("Memory", get_memory()),
-            ("Disk /", get_disk("/")),
+            ("Memory", f"{mu:.1f}/{mt:.1f}GiB {bar(mpct)}"),
+            ("Disk /", f"{du:.0f}/{dt:.0f}GiB {bar(dpct)}"),
         ]),
     ]
 
     # опциональные
     res = get_resolution()
     if res:
-        sections[1][1].append(("Resolution", res))
-    bat = get_battery()
+        sections[1][1].append(("Display", res))
+    if len(get_gpu()) > 1:
+        sections[1][1].append(("GPU2", get_gpu()[1]))
+    if cpu_temp is not None:
+        sections[1][1].append(("Temp", f"{cpu_temp:.0f}°C"))
     if bat:
-        sections[2][1].append(("Battery", bat))
+        pct, status = bat
+        icon_b = "⚡" if status == "Charging" else "🔋"
+        sections[2][1].append(("Battery", f"{pct}% {icon_b} {bar(pct)}"))
     ip = get_ip()
     if ip:
         sections[2][1].append(("Local IP", ip))
@@ -280,19 +460,25 @@ def render_static() -> None:
     """Отрисовывает логотип + инфу, выходит."""
     art = get_art()
     sections = build_sections()
+    user = os.environ.get("USER", "user")
+    host = socket.gethostname()
 
     # рисуем арт с огненным градиентом
     art_lines = []
     for ri, line in enumerate(art):
         t = ri / max(len(art) - 1, 1)
-        # верх арта — ярче (белый), низ — глубже огонь
         ct = 0.35 + 0.65 * (1.0 - t)
         art_lines.append(fg(fire_color(ct)) + line)
 
+    # заголовок user@host под артом
+    art_lines.append("")
+    art_lines.append(fg(196) + BOLD + " " * 2 + user + RESET
+                     + fg(208) + "@" + RESET
+                     + fg(226) + BOLD + host + RESET)
+
     # подпись
     art_lines.append("")
-    sub = "by lostflam"
-    art_lines.append(fg(fire_color(0.3)) + " " * 6 + sub)
+    art_lines.append(fg(fire_color(0.3)) + " " * 6 + "by lostflam")
 
     # инфо-блок
     info_lines = []
@@ -565,6 +751,24 @@ def render_animated(intro: float = 0.0) -> None:
                                 ny, nx = sy + dy, sx + i + dx
                                 if 0 <= ny < rows and 0 <= nx < cols and canvas[ny][nx] == " ":
                                     glow[ny][nx] = max(glow[ny][nx], 0.5)
+
+            # ---- заголовок user@host под артом ----
+            user = os.environ.get("USER", "user")
+            host = socket.gethostname()
+            header = f"{user}@{host}"
+            ty = sy + 2
+            if 0 <= ty < rows:
+                tx = 4
+                for i, ch in enumerate(header):
+                    if tx + i < cols:
+                        canvas[ty][tx + i] = ch
+                        # пользователь красный, @ оранжевый, хост жёлтый
+                        if i < len(user):
+                            ccolor[ty][tx + i] = 196
+                        elif ch == "@":
+                            ccolor[ty][tx + i] = 208
+                        else:
+                            ccolor[ty][tx + i] = 226
 
             # ===== инфо-блок: кладём в canvas справа =====
             info_y = 2
