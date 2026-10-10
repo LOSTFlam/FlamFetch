@@ -9,11 +9,11 @@ url="https://github.com/LOSTFlam/FlamFetch"
 license=('MIT')
 depends=('python' 'python-pyfiglet')
 optdepends=('hyprland: display resolution detection')
-source=("${pkgname}-${pkgver}.tar.gz::https://github.com/LOSTFlam/FlamFetch/archive/v${pkgver}.tar.gz")
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/LOSTFlam/FlamFetch/archive/v1.2.0.tar.gz")
 sha256sums=('SKIP')
 
 package() {
-    cd "${srcdir}/FlamFetch-${pkgver}"
+    cd "${srcdir}/FlamFetch-1.2.0"
 
     # Основной скрипт
     install -Dm755 flamfetch/flamfetch.py "${pkgdir}/usr/bin/flamfetch"
