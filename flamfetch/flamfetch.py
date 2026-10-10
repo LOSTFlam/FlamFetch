@@ -345,6 +345,168 @@ def bar(pct: float, width: int = 10) -> str:
     return fg(color) + bar_str + RESET
 
 
+def uptime_bar(seconds: float, max_days: float = 7.0, width: int = 10) -> str:
+    """Бар uptime: сколько от максимума (7 дней) отработала система."""
+    pct = min(100.0, seconds / (max_days * 86400) * 100)
+    filled = int(pct / 100 * width)
+    if filled == 0 and pct > 0:
+        filled = 1          # минимум 1 клетка если система работает
+    bar_str = BAR_FILLED * filled + BAR_EMPTY * (width - filled)
+    # цвет: молодой uptime = зелёный, старый = жёлтый/красный
+    if pct < 30:
+        color = 78
+    elif pct < 70:
+        color = 220
+    else:
+        color = 196
+    return fg(color) + bar_str + RESET
+
+
+# ---------------------------------------------------------------- сеть
+
+def get_interfaces() -> list[tuple[str, str, str]]:
+    """Активные сетевые интерфейсы: [(имя, статус, IP), ...]"""
+    out = _run(["ip", "-brief", "addr", "show"])
+    if not out:
+        return []
+    ifaces = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0]
+        status = parts[1]
+        ip = parts[2] if len(parts) > 2 else ""
+        # пропускаем loopback и неактивные
+        if name == "lo" or status not in ("UP", "UNKNOWN"):
+            continue
+        # UNKNOWN с IP = активен (типично для tun)
+        if status == "UNKNOWN" and not ip:
+            continue
+        ifaces.append((name, status, ip))
+    return ifaces
+
+
+def get_vpn_interfaces() -> list[str]:
+    """VPN-интерфейсы (tun, wg, tap, ppp)."""
+    out = _run(["ip", "-brief", "addr", "show"])
+    if not out:
+        return []
+    vpns = []
+    for line in out.splitlines():
+        name = line.split()[0] if line.split() else ""
+        if any(x in name.lower() for x in ("tun", "wg", "tap", "ppp", "proton", "nord")):
+            vpns.append(name)
+    return vpns
+
+
+def get_external_info() -> dict | None:
+    """Внешний IP + гео (страна, город) через ipinfo.io."""
+    out = _run(["curl", "-s", "--max-time", "5", "https://ipinfo.io/json"])
+    if not out:
+        return None
+    try:
+        import json
+        data = json.loads(out)
+        return {
+            "ip": data.get("ip", "?"),
+            "country": data.get("country", "?"),
+            "city": data.get("city", "?"),
+            "org": data.get("org", "?"),
+        }
+    except Exception:
+        return None
+
+
+def get_speed() -> tuple[float, float] | None:
+    """Быстрый спидтест: скачивает 10MB с Cloudflare, возвращает (Mbps, сек).
+    Возвращает None при ошибке/таймауте."""
+    import time
+    url = "https://speed.cloudflare.com/__down?bytes=10000000"
+    try:
+        start = time.monotonic()
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "8", "-o", "/dev/null",
+             "-w", "%{size_download}", url],
+            capture_output=True, text=True, timeout=10,
+        )
+        elapsed = time.monotonic() - start
+        size = int(r.stdout.strip() or 0)
+        if size <= 0 or elapsed <= 0:
+            return None
+        mbps = (size * 8) / (elapsed * 1_000_000)
+        return mbps, elapsed
+    except Exception:
+        return None
+
+
+def get_build_info() -> dict:
+    """Инфа о сборке ОС."""
+    osrel = _read("/etc/os-release")
+    info = {"id": "?", "version": "?", "build_id": "?"}
+    if osrel:
+        for line in osrel.splitlines():
+            if line.startswith("ID="):
+                info["id"] = line.split("=", 1)[1].strip('"')
+            elif line.startswith("VERSION_ID="):
+                info["version"] = line.split("=", 1)[1].strip('"')
+            elif line.startswith("BUILD_ID="):
+                info["build_id"] = line.split("=", 1)[1].strip('"')
+    return info
+
+
+def get_uptime_seconds() -> float:
+    raw = _read("/proc/uptime")
+    if raw:
+        return float(raw.split()[0])
+    return 0.0
+
+
+def get_swap() -> tuple[float, float] | None:
+    """(used, total) swap в GiB или None если нет."""
+    info = _read("/proc/meminfo")
+    if not info:
+        return None
+    vals = {}
+    for line in info.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            vals[parts[0].rstrip(":")] = int(parts[1])
+    total = vals.get("SwapTotal", 0) / 1024 / 1024
+    free = vals.get("SwapFree", 0) / 1024 / 1024
+    if total <= 0:
+        return None
+    used = total - free
+    return used, total
+
+
+def get_load() -> str:
+    """Load average (1/5/15 мин) из /proc/loadavg."""
+    raw = _read("/proc/loadavg")
+    if not raw:
+        return "?"
+    parts = raw.split()
+    return f"{parts[0]} {parts[1]} {parts[2]}"
+
+
+def get_processes() -> int:
+    """Число запущенных процессов."""
+    try:
+        return len([d for d in os.listdir("/proc") if d.isdigit()])
+    except Exception:
+        return 0
+
+
+def get_parent_process() -> str:
+    """Родительский процесс (чем запущен flamfetch)."""
+    try:
+        ppid = os.getppid()
+        comm = _read(f"/proc/{ppid}/comm")
+        return comm or "?"
+    except Exception:
+        return "?"
+
+
 # ============================================================ разделы
 
 def _parse_mem() -> tuple[float, float, float]:
@@ -389,12 +551,11 @@ def _parse_battery() -> tuple[int, str] | None:
     return None
 
 
-def build_sections() -> list[tuple[str, list[tuple[str, str]]]]:
-    """Возвращает [(заголовок, [(ключ, значение), ...]), ...]"""
+def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Возвращает [(заголовок, [(ключ, значение), ...]), ...]
+    with_speed=True — делает спидтест (медленно, ~2-8 сек)."""
     host, os_name = get_host()
     icon = get_distro_icon()
-    user = os.environ.get("USER", "user")
-    title = f"{user}@{host}"
 
     # температура CPU
     temps = get_temps()
@@ -411,13 +572,21 @@ def build_sections() -> list[tuple[str, list[tuple[str, str]]]]:
     # память / диск
     mu, mt, mpct = _parse_mem()
     du, dt, dpct = _parse_disk("/")
+    # uptime
+    up_sec = get_uptime_seconds()
+
+    # ===== сеть =====
+    ifaces = get_interfaces()
+    vpns = get_vpn_interfaces()
+    ext = get_external_info()
+    speed = get_speed() if with_speed else None
 
     sections = [
         ("◈ Система", [
             ("OS", f"{icon} {os_name}"),
             ("Host", host),
             ("Kernel", get_kernel()),
-            ("Uptime", get_uptime()),
+            ("Uptime", f"{get_uptime()} {uptime_bar(up_sec)}"),
         ]),
         ("◈ Оборудование", [
             ("CPU", get_cpu()),
@@ -425,6 +594,7 @@ def build_sections() -> list[tuple[str, list[tuple[str, str]]]]:
             ("DE", get_de()),
             ("Terminal", get_terminal()),
             ("Shell", get_shell()),
+            ("Launched", get_parent_process()),
         ]),
         ("◈ Ресурсы", [
             ("Memory", f"{mu:.1f}/{mt:.1f}GiB {bar(mpct)}"),
@@ -432,7 +602,7 @@ def build_sections() -> list[tuple[str, list[tuple[str, str]]]]:
         ]),
     ]
 
-    # опциональные
+    # опциональные — оборудование
     res = get_resolution()
     if res:
         sections[1][1].append(("Display", res))
@@ -440,26 +610,79 @@ def build_sections() -> list[tuple[str, list[tuple[str, str]]]]:
         sections[1][1].append(("GPU2", get_gpu()[1]))
     if cpu_temp is not None:
         sections[1][1].append(("Temp", f"{cpu_temp:.0f}°C"))
+
+    # ===== раздел Сеть =====
+    net_items = []
+    # активные интерфейсы
+    for name, status, ip in ifaces:
+        if name in vpns:
+            continue  # VPN покажем отдельно
+        tag = "VPN" if any(v in name for v in vpns) else name
+        ip_short = ip.split("/")[0] if ip else "-"
+        net_items.append(("Iface", f"{tag} ({ip_short})"))
+    # VPN-статус
+    if vpns:
+        vpn_name = vpns[0]
+        if ext:
+            net_items.append(("VPN", f"✓ {vpn_name} → {ext['country']} ({ext['city']})"))
+        else:
+            net_items.append(("VPN", f"✓ {vpn_name}"))
+        # подсказка что WAN через VPN
+        net_items.append(("Note", "WAN IP / страна — через VPN"))
+    else:
+        if ext:
+            net_items.append(("VPN", f"✗ off → {ext['country']} ({ext['city']})"))
+    # внешний IP
+    if ext:
+        net_items.append(("WAN IP", ext["ip"]))
+    # скорость
+    if speed:
+        mbps, elapsed = speed
+        net_items.append(("Speed", f"↓ {mbps:.0f} Mbps ({elapsed:.1f}s)"))
+    elif with_speed:
+        net_items.append(("Speed", "недоступен"))
+
+    if net_items:
+        sections.append(("◈ Сеть", net_items))
+
+    # батарея, IP, пакеты — в Ресурсы
     if bat:
         pct, status = bat
         icon_b = "⚡" if status == "Charging" else "🔋"
         sections[2][1].append(("Battery", f"{pct}% {icon_b} {bar(pct)}"))
-    ip = get_ip()
-    if ip:
-        sections[2][1].append(("Local IP", ip))
     pkgs = get_packages()
     if pkgs != "?":
         sections[2][1].append(("Packages", pkgs))
+    # swap
+    swap = get_swap()
+    if swap:
+        su, st = swap
+        spct = 100 * su / st if st else 0
+        sections[2][1].append(("Swap", f"{su:.1f}/{st:.1f}GiB {bar(spct)}"))
+    # load + процессы
+    sections[2][1].append(("Load", get_load()))
+    procs = get_processes()
+    if procs:
+        sections[2][1].append(("Processes", str(procs)))
+
+    # ===== раздел Сборка =====
+    binfo = get_build_info()
+    build_items = [
+        ("OS ID", binfo["id"]),
+        ("Version", binfo["version"]),
+        ("Build", binfo["build_id"]),
+    ]
+    sections.append(("◈ Сборка", build_items))
 
     return sections
 
 
 # ============================================================ рендер (статика)
 
-def render_static() -> None:
+def render_static(with_speed: bool = False) -> None:
     """Отрисовывает логотип + инфу, выходит."""
     art = get_art()
-    sections = build_sections()
+    sections = build_sections(with_speed=with_speed)
     user = os.environ.get("USER", "user")
     host = socket.gethostname()
 
@@ -566,7 +789,7 @@ class Particle:
         return GLITCH_COLORS[int(t * (len(GLITCH_COLORS) - 1)) % len(GLITCH_COLORS)]
 
 
-def render_animated(intro: float = 0.0) -> None:
+def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     art = get_art()
     flam = art[:5]
     quency = art[7:]
@@ -595,7 +818,7 @@ def render_animated(intro: float = 0.0) -> None:
     quency_rows = list(range(2 + len(flam) + 1, 2 + len(flam) + 1 + len(quency)))
 
     # ===== собираем инфо-блок один раз =====
-    sections = build_sections()
+    sections = build_sections(with_speed=with_speed)
     info_text = []
     for title, items in sections:
         info_text.append((None, None, f"{title}", "header"))
@@ -860,10 +1083,12 @@ def main():
                         help="секунд анимации, затем выход (0 = бесконечно)")
     parser.add_argument("--no-logo", action="store_true",
                         help="только системная информация, без логотипа")
+    parser.add_argument("--speed", "-s", action="store_true",
+                        help="сделать быстрый спидтест (добавляет ~2-8 сек)")
     args = parser.parse_args()
 
     if args.no_logo:
-        sections = build_sections()
+        sections = build_sections(with_speed=args.speed)
         for title, items in sections:
             print(fg(COLOR_HEADER) + BOLD + title + RESET)
             for k, v in items:
@@ -874,9 +1099,9 @@ def main():
         return
 
     if args.animate:
-        render_animated(args.intro)
+        render_animated(args.intro, with_speed=args.speed)
     else:
-        render_static()
+        render_static(with_speed=args.speed)
 
 
 if __name__ == "__main__":
