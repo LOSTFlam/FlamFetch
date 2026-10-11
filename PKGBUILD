@@ -16,7 +16,7 @@ source=("${pkgname}-${pkgver}.tar.gz::https://github.com/LOSTFlam/FlamFetch/arch
 sha256sums=('SKIP')
 
 package() {
-    cd "${srcdir}/FlamFetch-1.2.0"
+    cd "${srcdir}/FlamFetch-${pkgver}"
 
     # Основной скрипт
     install -Dm755 flamfetch/flamfetch.py "${pkgdir}/usr/bin/flamfetch"
