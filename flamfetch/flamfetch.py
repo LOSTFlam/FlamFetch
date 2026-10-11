@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.0
+Версия: 1.9.1
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.0"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.1"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -1165,12 +1165,12 @@ def get_art() -> list[str]:
 # иконка читается как «лицо» программы.
 
 BANNER_ART = [
-    "███████╗██╗      █████╗ ███╗   ███╗███████╗███████╗████████╗ ██████╗ ██╗  ██╗",
-    "██╔════╝██║     ██╔══██╗████╗ ████║██╔════╝██╔════╝╚══██╔══╝██╔════╝ ██║  ██║",
-    "█████╗  ██║     ███████║██╔████╔██║█████╗  █████╗     ██║   ██║      ███████║",
-    "██╔══╝  ██║     ██╔══██║██║╚██╔╝██║██╔══╝  ██╔══╝     ██║   ██║      ██╔══██║",
-    "██║     ███████╗██║  ██║██║ ╚═╝ ██║██║     ███████╗   ██║   ╚██████╗██║  ██║ ",
-    "╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚══════╝   ╚═╝    ╚═════╝╚═╝  ╚═╝ ",
+    "███████╗██╗      █████╗ ███╗   ███╗ ███████╗ ███████╗ ████████╗  ██████╗  ██╗  ██╗",
+    "██╔════╝██║     ██╔══██╗████╗ ████║ ██╔════╝ ██╔════╝ ╚══██╔══╝ ██╔════╝  ██║  ██║",
+    "█████╗  ██║     ███████║██╔████╔██║ ██████╗  ██████╗     ██║    ██║       ███████║",
+    "██╔══╝  ██║     ██╔══██║██║╚██╔╝██║ ██╔══╝  ██╔══╝     ██║    ██║       ██╔══██║",
+    "██║     ███████╗██║  ██║██║ ╚═╝ ██║ ██║     ███████╗    ██║    ╚██████╗  ██║  ██║",
+    "╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝ ╚═╝     ╚══════╝    ╚═╝     ╚═════╝  ╚═╝  ╚═╝",
 ]
 
 # --- настройки баннера (--banner / --no-banner / конфиг) ---
@@ -2854,26 +2854,13 @@ def render_static(with_speed: bool = False, with_ping: bool = False) -> None:
     icon = get_distro_icon()
 
     art_lines = []
-    # ---- блочный баннер: огненный градиент + иконка поверх ----
+    # ---- блочный баннер: огненный градиент ----
     if banner:
         banner_w = max(len(l) for l in banner)
-        # иконка поверх баннера — «главный» элемент: центр слова,
-        # буквы под ней гаснут, сама — bold белым с огненным гало
-        icon_x = min(37, max(0, banner_w // 2 - 1))
-        icon_y = len(banner) // 2
         for ri, line in enumerate(banner):
             t = ri / max(len(banner) - 1, 1)
             ct = 0.35 + 0.65 * (1.0 - t)
             art_lines.append(fg(fire_color(ct)) + line)
-        # стираем буквы под иконкой и рисуем её
-        b_line = banner[icon_y]
-        left = b_line[:icon_x]
-        right = b_line[icon_x + 2:]
-        t = icon_y / max(len(banner) - 1, 1)
-        ct = 0.35 + 0.65 * (1.0 - t)
-        art_lines[icon_y] = (fg(fire_color(ct)) + left + RESET
-                             + fg(255) + BOLD + icon + RESET
-                             + fg(fire_color(ct)) + right)
         art_lines.append("")
     # ---- slant-арт: как было ----
     for ri, line in enumerate(art):
@@ -3077,9 +3064,6 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
     art_h = len(banner) + 1 + len(art)   # баннер + пропуск + slant-арт
     banner_w = max(len(l) for l in banner) if banner else 0
     banner_rows = list(range(2, 2 + len(banner))) if banner else []
-    distro_icon = get_distro_icon()
-    icon_x = min(37, max(0, banner_w // 2 - 1)) if banner else 0
-    icon_y = banner_rows[len(banner) // 2] if banner else -1
 
     try:
         cols, rows = os.get_terminal_size()
@@ -3178,9 +3162,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                 BANNER_ENABLED = not BANNER_ENABLED
                 banner = get_banner_art()
                 banner_rows = list(range(2, 2 + len(banner))) if banner else []
-                icon_y = banner_rows[len(banner) // 2] if banner else -1
                 banner_w = max(len(l) for l in banner) if banner else 0
-                icon_x = min(37, max(0, banner_w // 2 - 1)) if banner else 0
                 art_w = max((max(len(l) for l in art) if art else 0), banner_w)
                 info_col = art_w + 6
                 max_block_w = max(20, cols - info_col - 1)
@@ -3224,9 +3206,6 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                         continue
                     x = ci + 2
                     if not (0 <= x < cols):
-                        continue
-                    # иконка поверх баннера: буквы под ней гаснут
-                    if y == icon_y and icon_x <= x < icon_x + 2:
                         continue
                     canvas[y][x] = ch
                     t = ri / max(len(banner) - 1, 1)
@@ -3337,13 +3316,11 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                     continue
                 tx, ty = int(p.px), int(p.py)
                 if (0 <= tx < cols and 0 <= ty < rows and canvas[ty][tx] == " "
-                        and (ty, tx) not in icon_cells
                         and p.kind == "fire" and p.life < p.max_life * 0.7):
                     canvas[ty][tx] = random.choice(["·", ".", " "])
                     ccolor[ty][tx] = 52 if p.life > 6 else 238
                 x, y = int(p.x), int(p.y)
-                if 0 <= x < cols and 0 <= y < rows and canvas[y][x] == " " \
-                        and (y, x) not in icon_cells:
+                if 0 <= x < cols and 0 <= y < rows and canvas[y][x] == " ":
                     canvas[y][x] = p.char
                     ccolor[y][x] = p.color()
                 alive.append(p)
@@ -3616,24 +3593,6 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                         ccolor[bot_y][x] = col
                         if at:
                             cattr[bot_y][x] = at
-
-            # иконка дистрибутива: bold белая, с огненным гало — «главный» элемент.
-            # Рисуется в самом конце — поверх всех частиц и глитчей.
-            icon_cells = set()
-            if 0 <= icon_y < rows:
-                for i, ch in enumerate(distro_icon):
-                    x = icon_x + i
-                    if 0 <= x < cols:
-                        canvas[icon_y][x] = ch
-                        ccolor[icon_y][x] = 255
-                        cattr[icon_y][x] = BOLD
-                        icon_cells.add((icon_y, x))
-                for dy in (-1, 0, 1):
-                    for dx in (-2, -1, 0, 1, 2):
-                        ny, nx = icon_y + dy, icon_x + dx
-                        if 0 <= ny < rows and 0 <= nx < cols:
-                            glow[ny][nx] = max(glow[ny][nx],
-                                               0.45 + 0.2 * math.sin(beat(frame, 3.0)))
 
             # ===== вывод кадра =====
             out = ["\033[H"]
