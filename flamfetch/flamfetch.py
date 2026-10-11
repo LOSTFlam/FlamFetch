@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.8.0
+Версия: 1.8.1
 """
 
 import argparse
@@ -3328,7 +3328,7 @@ def main():
     parser.add_argument("--lang", "-l", choices=["en", "ru"], default=None,
                         help="interface language (default: en; env FLAMFETCH_LANG)")
     parser.add_argument("--version", "-V", action="version",
-                        version="flamfetch 1.8.0")
+                        version="flamfetch 1.8.1")
     args = parser.parse_args()
 
     # язык: флаг > переменная окружения > системная локаль > en
