@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.3
+Версия: 1.9.4
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.3"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.4"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -3040,7 +3040,76 @@ def do_update() -> bool:
     print(f"    curl -o {share} {url}")
     return False
 
+# Минимальная ширина колонки ключей; фактическая вычисляется динамически
+# от самого длинного ключа (русские переводы шире английских).
 KEY_WIDTH = 12
+
+
+def _visible_pad(s: str, width: int) -> str:
+    """Выравнивает строку по ВИДИМОЙ ширине (не по len)."""
+    return s + " " * max(0, width - visible_width(s))
+
+
+def _row_body(row) -> tuple[str, int]:
+    """(текст строки, видимая ширина) — единый конструктор для статики
+    и для расчёта ширины рамки. Значок + коннектор + ключ + значение [+ бар]."""
+    icon = key_icon(row.key)
+    conn = TREE_MID
+    key = _visible_pad(T(row.key), KEY_WIDTH)
+    parts = [icon, " ", conn, key, " "]
+    w = visible_width(icon) + 1 + visible_width(conn) + visible_width(key) + 1
+    if is_palette_value(row.value):
+        # квадратики: 2 клетки на цвет + пробел между
+        for i, c in enumerate(row.value):
+            parts.append(fg(c) + "██" + RESET)
+            if i < len(row.value) - 1:
+                parts.append(" ")
+        w += 2 * len(row.value) + max(0, len(row.value) - 1)
+    else:
+        value = row.value or "-"
+        parts.append(str(value))
+        w += visible_width(str(value))
+        if row.pct is not None:
+            parts.append(" ")
+            w += 1
+            if getattr(row, "bar_kind", None) == "uptime":
+                parts.append(uptime_bar(row.pct / 100 * 7 * 86400))
+            else:
+                parts.append(bar(row.pct))
+            w += 10
+    return "".join(parts), w
+
+
+class _FakeRow:
+    """Строка-заглушка для единого расчёта ширины (build_blocks)."""
+    __slots__ = ("key", "value", "pct", "bar_kind")
+
+    def __init__(self, key, value, pct):
+        self.key = key
+        self.value = value
+        self.pct = pct
+        self.bar_kind = "uptime" if key == "Uptime" else None
+
+
+def auto_key_width(sections) -> int:
+    """KEY_WIDTH по самому длинному ключу среди всех секций (с запасом).
+    Вызывается перед рендером — колонка ключей не «прыгает» ни в каком
+    языке и ни при каких значениях."""
+    global KEY_WIDTH
+    m = 0
+    for title, items in sections:
+        for key, value, pct in items:
+            m = max(m, visible_width(T(key)))
+    KEY_WIDTH = max(12, m + 1)
+    return KEY_WIDTH
+
+
+def _block_width(rows, title: str) -> int:
+    """Ширина рамки: по самой широкой строке И заголовку."""
+    content_w = max((_row_body(r)[1] for r in rows), default=0)
+    # заголовок: рамка + пробел + заголовок + пробел
+    title_w = visible_width(title) + 4
+    return max(content_w + 4, title_w, KEY_WIDTH + 12)
 
 
 def _static_block_lines(blk, frame: int = 0) -> list[str]:
@@ -3050,7 +3119,7 @@ def _static_block_lines(blk, frame: int = 0) -> list[str]:
     # ---- верхняя линия с заголовком ----
     title = f" {T(blk.title)} "
     inner = blk.width - 2
-    pad = max(0, inner - len(title))
+    pad = max(0, inner - visible_width(title))
     left_pad = pad // 2
     right_pad = pad - left_pad
     lines.append(fg(fam_dim) + FRAME_TL + FRAME_H * left_pad + RESET
@@ -3062,34 +3131,24 @@ def _static_block_lines(blk, frame: int = 0) -> list[str]:
         is_last = kv_i == n - 1
         conn = TREE_END if is_last else TREE_MID
         col = family_color(blk.si, kv_i, n, frame)
-        icon = key_icon(row.key)
-        # палитра темы — особая строчка с цветными квадратиками
-        if is_palette_value(row.value):
-            swatches = " ".join(fg(c) + "██" + RESET for c in row.value)
-            body = f"{icon} {conn}{T(row.key):<{KEY_WIDTH}} {swatches}"
-            body_vis = visible_width(icon) + 1 + len(conn) + KEY_WIDTH + 1 \
-                + 2 * len(row.value) + max(0, len(row.value) - 1)
-        else:
-            value = row.value or "-"
-            body = f"{icon} {conn}{T(row.key):<{KEY_WIDTH}} {value}"
-            if row.pct is not None:
-                if row.bar_kind == "uptime":
-                    body += " " + uptime_bar(row.pct / 100 * 7 * 86400)
-                else:
-                    body += " " + bar(row.pct)
-            body_vis = visible_width(icon) + 1 + len(conn) + KEY_WIDTH + 1 \
-                + visible_width(str(value)) \
-                + (11 if row.pct is not None else 0)
+        # единый конструктор: тело строки + видимая ширина
+        body, body_vis = _row_body(row)
+        # коннектор последней строки — дерево └─
+        if is_last:
+            body = body.replace(TREE_MID, TREE_END, 1)
         # стенки-оконтовка: первая и последняя строки блока — без стенок,
-        # но на разрывах — узор
+        # но на разрывах — узор. Средние — стенка+пробел (шире!), поэтому
+        # fill считается от ФАКТИЧЕСКОЙ ширины левой+правой части.
         pl, pr = break_pattern(frame)
         if kv_i == 0 or is_last:
             left = fg(fam_dim) + pl + RESET
             right = fg(fam_dim) + pr + RESET
+            side_w = visible_width(pl) + visible_width(pr)
         else:
             left = fg(fam_dim) + FRAME_V + " " + RESET
             right = fg(fam_dim) + " " + FRAME_V + RESET
-        vis = blk.width - 2 - body_vis
+            side_w = 4          # │ + пробел + пробел + │
+        vis = blk.width - side_w - body_vis
         fill = " " * max(0, vis)
         lines.append(left + fg(col) + BOLD + body + RESET + fill + right)
     # ---- нижняя линия ----
@@ -3116,6 +3175,8 @@ def render_static(with_speed: bool = False, with_ping: bool = False,
     banner = get_banner_art()
     sections = build_sections(with_speed=with_speed, with_ping=with_ping,
                               with_clock=with_clock, with_weather=with_weather)
+    # ширина колонки ключей — по фактическому тексту (любой язык/значения)
+    auto_key_width(sections)
     user = os.environ.get("USER", "user")
     host = socket.gethostname()
     icon = get_distro_icon()
@@ -3262,7 +3323,7 @@ class Block:
 
 def _row_content_width(key: str, value: str, pct: float | None) -> int:
     """Ширина строки внутри рамки: значок + коннектор + ключ + значение + бар.
-    Ключ выравнивается по колонке KEY_WIDTH — считаем по ней, не по факту."""
+    Ключ выравнивается по KEY_WIDTH — считаем по ней."""
     w = visible_width(key_icon(key)) + 1 + len(TREE_MID) + KEY_WIDTH + 1 + visible_width(str(value))
     if pct is not None:
         w += 1 + 10 + 1              # пробел + бар (10) + запас
@@ -3285,8 +3346,10 @@ def build_blocks(sections, rot: int = 0, frame_base: int = 0,
         block_anim = ANIM_LIBRARY[(si + rot) % n_anim]
         n_rows = len(real)
         # ширина рамки — по самой длинной строке блока
-        content_w = max(_row_content_width(k, str(v), p) for k, v, p in real)
-        content_w = max(content_w, len(title) + 6)
+        # единый расчёт: тело каждой строки + видимая ширина
+        content_w = max((_row_body(r)[1] for r in (
+                            _FakeRow(k, v, p) for k, v, p in real)), default=0)
+        content_w = max(content_w, visible_width(title) + 6)
         width = min(content_w + 4, max_width)   # │ + пробел + контент + пробел + │
 
         rows = []
@@ -3342,6 +3405,8 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
     rot = _rotation_offset()
     sections = build_sections(with_speed=with_speed, with_ping=with_ping,
                               with_clock=with_clock, with_weather=with_weather)
+    # ширина колонки ключей — по фактическому тексту (любой язык/значения)
+    auto_key_width(sections)
 
     art_w = max((max(len(l) for l in art) if art else 0), banner_w)
     info_col = art_w + 6
@@ -3775,7 +3840,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                     # ---- палитра темы: цветные квадратики вместо текста ----
                     if is_palette_value(row.value):
                         # префикс: значок + коннектор + ключ — как у обычной строки
-                        prefix = f"{icon} {conn}{T(row.key).ljust(KEY_WIDTH)} "
+                        prefix = f"{icon} {conn}{_visible_pad(T(row.key), KEY_WIDTH)} "
                         pos = 0
                         for j, ch in enumerate(prefix):
                             gp = pos + j
@@ -3809,7 +3874,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
 
                     seq = [(icon + " ", base, "", "icon"),
                            (conn, shade_color(fam_dim, 0.8), "", "conn"),
-                           (T(row.key).ljust(KEY_WIDTH), key_base,
+                           (_visible_pad(T(row.key), KEY_WIDTH), key_base,
                             BOLD if math.sin(beat(frame, 2.2) + phase) > -0.3 else "",
                             "key"),
                            (" ", COLOR_DIM, "", "gap"),
