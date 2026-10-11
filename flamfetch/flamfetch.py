@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.5
+Версия: 1.9.6
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.5"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.6"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -107,6 +107,7 @@ def get_config() -> dict:
 RU = {
     # заголовки блоков
     "◈ System": "◈ Система",
+    "◈ Live": "◈ Live",
     "◈ Hardware": "◈ Оборудование",
     "◈ Resources": "◈ Ресурсы",
     "◈ Network": "◈ Сеть",
@@ -156,8 +157,9 @@ RU = {
     "WAN IP": "Внеш. IP",
     "Speed": "Скорость",
     "Ping": "Пинг",
-    "Clock": "Время",
+    "Time": "Время",
     "Weather": "Погода",
+    "Clock": "Время",
     # ключи — Тема
     "GTK": "GTK",
     "Icons": "Иконки",
@@ -353,7 +355,7 @@ def _resample(pal: list[int], n: int) -> list[int]:
 
 
 # сколько разделов максимум показывается
-_MAX_SECTIONS = 6
+_MAX_SECTIONS = 7
 
 
 # ============================================================ наборы палитр
@@ -2624,8 +2626,7 @@ def _parse_battery() -> tuple[int, str] | None:
     return None
 
 
-def build_sections(with_speed: bool = False, with_ping: bool = False,
-                   with_clock: bool = False, with_weather: bool = False) -> list[tuple[str, list[tuple[str, str, float | None]]]]:
+def build_sections(with_speed: bool = False, with_ping: bool = False) -> list[tuple[str, list[tuple[str, str, float | None]]]]:
     """Возвращает [(заголовок, [(ключ, значение, бар%), ...]), ...]
     with_speed=True — делает спидтест (медленно, ~2-8 сек)."""
     host, os_name = get_host()
@@ -2666,8 +2667,6 @@ def build_sections(with_speed: bool = False, with_ping: bool = False,
         ("Kernel", get_kernel(), None),
         ("Uptime", get_uptime(), min(100.0, up_sec / (7 * 86400) * 100)),
     ]
-    if with_clock:
-        sys_items.append(("Clock", get_clock(), None))
     if board:
         sys_items.append(("Board", board, None))
     if bios:
@@ -2738,7 +2737,13 @@ def build_sections(with_speed: bool = False, with_ping: bool = False,
     if procs:
         res_items.append(("Processes", str(procs), None))
 
+    # ---------- ◈ Live: время + погода — всегда, одним блоком ----------
+    live_items = [("Time", get_clock(), None)]
+    weather = get_weather()
+    if weather:
+        live_items.append(("Weather", weather, None))
     sections = [
+        ("◈ Live", live_items),
         ("◈ System", sys_items),
         ("◈ Hardware", hw_items),
         ("◈ Resources", res_items),
@@ -2777,10 +2782,6 @@ def build_sections(with_speed: bool = False, with_ping: bool = False,
         p = get_ping()
         if p:
             net_items.append(("Ping", p, None))
-    if with_weather:
-        w = get_weather()
-        if w:
-            net_items.append(("Weather", w, None))
     if net_items:
         sections.append(("◈ Network", net_items))
 
@@ -3219,13 +3220,11 @@ def render_info_static(sections, indent: str = "") -> None:
 
 # ============================================================ рендер (статика)
 
-def render_static(with_speed: bool = False, with_ping: bool = False,
-                  with_clock: bool = False, with_weather: bool = False) -> None:
+def render_static(with_speed: bool = False, with_ping: bool = False) -> None:
     """Отрисовывает баннер + логотип + инфу, выходит."""
     art = get_art()
     banner = get_banner_art()
-    sections = build_sections(with_speed=with_speed, with_ping=with_ping,
-                              with_clock=with_clock, with_weather=with_weather)
+    sections = build_sections(with_speed=with_speed, with_ping=with_ping)
     # ширина колонки ключей — по фактическому тексту (любой язык/значения)
     auto_key_width(sections)
     user = os.environ.get("USER", "user")
@@ -3436,8 +3435,7 @@ def _bar_cells(pct: float, width: int) -> list[tuple[str, int]]:
 
 
 def render_animated(intro: float = 0.0, with_speed: bool = False,
-                    with_ping: bool = False, with_clock: bool = False,
-                    with_weather: bool = False) -> None:
+                    with_ping: bool = False) -> None:
     global BANNER_ENABLED
     art = get_art()
     banner = get_banner_art()
@@ -3454,8 +3452,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
 
     # ротация: каждая сессия стартует со сдвигом набора анимаций
     rot = _rotation_offset()
-    sections = build_sections(with_speed=with_speed, with_ping=with_ping,
-                              with_clock=with_clock, with_weather=with_weather)
+    sections = build_sections(with_speed=with_speed, with_ping=with_ping)
     # ширина колонки ключей — по фактическому тексту (любой язык/значения)
     auto_key_width(sections)
 
@@ -3464,6 +3461,24 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
     max_block_w = max(20, cols - info_col - 1)
     blocks = build_blocks(sections, rot=rot, max_width=max_block_w)
     rot_frame = 0          # кадр, на котором пересобрали анимации
+
+    # блок ◈ Live: ищем его и строку Time для живого обновления времени
+    live_blk = None
+    live_row = None
+    live_val_x = None
+    for blk in blocks:
+        if "Live" in blk.title:
+            live_blk = blk
+            for ri, row in enumerate(blk.rows):
+                if row.key == "Time":
+                    live_row = ri
+                    # x значения = 1 (рамка) + значок + пробел + коннектор
+                    # + ключ(KEY_WIDTH) + пробел
+                    icon = key_icon("Time")
+                    live_val_x = (1 + visible_width(icon) + 1
+                                  + len(TREE_MID) + KEY_WIDTH + 1)
+                    break
+            break
 
     # сколько строк нужно под инфоблок (+ логотип/подписи слева)
     need_rows = max((b.y_top + b.height for b in blocks), default=0) + 3
@@ -3744,29 +3759,6 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                                 if 0 <= ny < rows and 0 <= nx < cols and canvas[ny][nx] == " ":
                                     glow[ny][nx] = max(glow[ny][nx], 0.5)
 
-            # ---- живые часы (--clock): текущее время под подписью ----
-            if with_clock:
-                clock = get_clock()
-                cx, cy = 6, sy + 2
-                if 0 <= cy < rows:
-                    for i, ch in enumerate(clock):
-                        if cx + i < cols:
-                            canvas[cy][cx + i] = ch
-                            ccolor[cy][cx + i] = 255
-                            cattr[cy][cx + i] = BOLD
-                            for dy in (-1, 0, 1):
-                                for dx in (-1, 0, 1):
-                                    ny, nx = cy + dy, cx + i + dx
-                                    if 0 <= ny < rows and 0 <= nx < cols \
-                                            and canvas[ny][nx] == " ":
-                                        glow[ny][nx] = max(glow[ny][nx], 0.4)
-                    # двоеточия мигают
-                    if ":" in clock:
-                        if int(beat(frame, 1.0) * 2) % 2 == 0:
-                            for i, ch in enumerate(clock):
-                                if ch == ":" and cx + i < cols:
-                                    cattr[cy][cx + i] = DIM
-
             # ---- заголовок user@host под артом ----
             user = os.environ.get("USER", "user")
             host = socket.gethostname()
@@ -4017,6 +4009,36 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                         if at:
                             cattr[bot_y][x] = at
 
+            # ---- живое время в блоке ◈ Live (обновляется каждый кадр) ----
+            # находим строку Time в блоке Live и перерисовываем значение
+            if live_blk is not None and live_row is not None:
+                ly = live_blk.y_top + 1 + live_row
+                lx = info_col + live_val_x
+                if 0 <= ly < rows:
+                    # стираем старое значение (пробелами)
+                    for i in range(30):
+                        if lx + i < cols:
+                            canvas[ly][lx + i] = " "
+                            ccolor[ly][lx + i] = 0
+                            cattr[ly][lx + i] = ""
+                    # рисуем текущее время
+                    now = get_clock()
+                    for i, ch in enumerate(now):
+                        x = lx + i
+                        if x < cols:
+                            canvas[ly][x] = ch
+                            ccolor[ly][x] = 255
+                            cattr[ly][x] = BOLD
+                            # пульс вокруг цифр
+                            for dy in (-1, 0, 1):
+                                for dx in (-1, 0, 1):
+                                    ny, nx = ly + dy, x + dx
+                                    if 0 <= ny < rows and 0 <= nx < cols \
+                                            and canvas[ny][nx] == " ":
+                                        glow[ny][nx] = max(glow[ny][nx],
+                                                           0.35 + 0.15 * math.sin(
+                                                               beat(frame, 2.0)))
+
             # ===== вывод кадра =====
             out = ["\033[H"]
             for y in range(rows):
@@ -4101,10 +4123,6 @@ def main():
                             "mono", "candy"]))
     parser.add_argument("--theme-swap", action="store_true",
                         help="cycle through named palettes")
-    parser.add_argument("--clock", action="store_true",
-                        help="show current time in System section")
-    parser.add_argument("--weather", action="store_true",
-                        help="show weather from wttr.in in Network")
     parser.add_argument("--update-check", action="store_true",
                         help="check for a new FlamFetch version (once a day)")
     parser.add_argument("--update", action="store_true",
@@ -4185,17 +4203,14 @@ def main():
                          f"(have: {', '.join(NAMED_PALETTES)})")
 
     if args.no_logo:
-        sections = build_sections(with_speed=args.speed, with_ping=args.ping,
-                                  with_clock=args.clock, with_weather=args.weather)
+        sections = build_sections(with_speed=args.speed, with_ping=args.ping)
         render_info_static(sections)
         return
 
     if args.animate:
-        render_animated(args.intro, with_speed=args.speed, with_ping=args.ping,
-                        with_clock=args.clock, with_weather=args.weather)
+        render_animated(args.intro, with_speed=args.speed, with_ping=args.ping)
     else:
-        render_static(with_speed=args.speed, with_ping=args.ping,
-                      with_clock=args.clock, with_weather=args.weather)
+        render_static(with_speed=args.speed, with_ping=args.ping)
 
 
 if __name__ == "__main__":
