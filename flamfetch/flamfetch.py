@@ -4,7 +4,11 @@
 Вдохновлён fastfetch + neofetch, но с душой:
 - Слева:  анимированный логотип Flam/quency (пламя + глитч)
 - Справа: системная информация, разбитая по цветным разделам
-           Hardware / Software / Storage / Network
+           Система / Оборудование / Ресурсы / Сеть / Тема / Сборка
+- Каждый пункт имеет свой собственный цвет из палитры
+- В анимированном режиме инфоблок оживает:
+  печатающая машинка, shimmer каждого пункта, растущие бары,
+  огненные заголовки, scanning-полоса и цифровые глитчи
 
 Зависимости: Python 3.8+, pyfiglet. Всё остальное — stdlib.
 
@@ -14,6 +18,8 @@
     flamfetch --animate --intro 4   проиграть 4 сек и выйти
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
+
+Версия: 1.3.0
 """
 
 import argparse
@@ -26,6 +32,7 @@ import socket
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 try:
@@ -56,16 +63,29 @@ def fg(code: int) -> str:
     return f"\033[38;5;{code}m"
 
 
-def truecolor(r: int, g: int, b: int) -> str:
-    return f"\033[38;2;{r};{g};{b}m"
+# ============================================================ цвета пунктов
+#
+# Каждый ключ получает СВОЙ цвет — детерминированно, по хешу имени.
+# Так «Kernel» всегда одного цвета, «Battery» — другого, и т.д.
 
+ITEM_PALETTE = [
+    196, 203, 209, 215, 221, 228,      # красное → золото
+    190, 154, 118, 82, 46,             # лайм → изумруд
+    49, 51, 45, 39,                    # циан → синий
+    99, 141, 177, 213,                 # фиолет → лаванда
+    204,                               # розовый
+]
 
-# Цвета разделов (по важности)
-COLOR_HEADER = 196      # красный — заголовки разделов
-COLOR_KEY = 208         # оранжевый — ключи
+SECTION_COLORS = [196, 208, 154, 51, 141, 99]   # по одному на раздел
+
 COLOR_VALUE = 255       # белый — значения
-COLOR_ACCENT = 141      # фиолетовый — акценты
-COLOR_DIM = 245         # серый — второстепенное
+COLOR_DIM = 245         # серый — разделители
+COLOR_CURSOR = 255      # курсор печатающей машинки
+
+
+def item_color(key: str) -> int:
+    """Стабильный цвет пункта по его имени."""
+    return ITEM_PALETTE[zlib.crc32(key.encode()) % len(ITEM_PALETTE)]
 
 
 # ============================================================ арт
@@ -126,6 +146,32 @@ def get_uptime() -> str:
     return " ".join(parts)
 
 
+def get_board() -> str | None:
+    vendor = _read("/sys/class/dmi/id/board_vendor")
+    name = _read("/sys/class/dmi/id/board_name")
+    if vendor or name:
+        return f"{vendor or ''} {name or ''}".strip()
+    return None
+
+
+def get_bios() -> str | None:
+    return _read("/sys/class/dmi/id/bios_version")
+
+
+def get_locale() -> str:
+    loc = os.environ.get("LC_ALL") or os.environ.get("LANG") or "?"
+    return loc.split(".")[0] if loc != "?" else loc
+
+
+def get_init() -> str:
+    comm = _read("/proc/1/comm")
+    return comm or "?"
+
+
+def get_arch() -> str:
+    return platform.machine()
+
+
 def get_cpu() -> str:
     info = _read("/proc/cpuinfo")
     if info:
@@ -137,12 +183,18 @@ def get_cpu() -> str:
             if line.startswith("processor"):
                 cores += 1
         if model:
-            # короткое имя модели
             for junk in ("CPU", "Processor", "(R)", "(TM)", "with Radeon Graphics"):
                 model = model.replace(junk, "")
             model = " ".join(model.split())
             return f"{model} ({cores})"
     return platform.processor() or "?"
+
+
+def get_cpu_governor() -> str | None:
+    gov = _read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    if gov:
+        return gov
+    return None
 
 
 def get_memory() -> str:
@@ -186,12 +238,23 @@ def get_battery() -> str | None:
 
 
 def get_resolution() -> str | None:
-    # fallback через hyprctl
     out = _run(["hyprctl", "monitors"])
     if out:
         import re
         for line in out.splitlines():
-            m = re.search(r"(\d{3,4}x\d{3,4})", line)
+            m = re.search(r"(\d{3,4}x\d{3,4})@(\d+)", line)
+            if m:
+                return f"{m.group(1)}@{m.group(2)}Hz"
+    return None
+
+
+def get_monitor_name() -> str | None:
+    """Имя активного монитора (eDP-1 и т.п.)."""
+    out = _run(["hyprctl", "monitors"])
+    if out:
+        import re
+        for line in out.splitlines():
+            m = re.search(r"^Monitor\s+(\S+)", line)
             if m:
                 return m.group(1)
     return None
@@ -205,9 +268,36 @@ def get_de() -> str:
     return "TTY"
 
 
+def get_wm_version() -> str | None:
+    out = _run(["hyprctl", "version"])
+    if out:
+        import re
+        m = re.search(r"Hyprland\s+([\d.]+)", out)
+        if m:
+            return m.group(1)
+    return None
+
+
 def get_shell() -> str:
     sh = os.environ.get("SHELL", "")
     return Path(sh).name if sh else "?"
+
+
+def get_shell_version() -> str | None:
+    sh = get_shell()
+    if sh == "fish":
+        out = _run(["fish", "--version"])
+        if out:
+            return out.split()[-1] if "version" in out else out
+    elif sh == "bash":
+        out = _run(["bash", "--version"])
+        if out:
+            return out.split()[3].split("(")[0]
+    elif sh == "zsh":
+        out = _run(["zsh", "--version"])
+        if out:
+            return out.split()[1]
+    return None
 
 
 def get_packages() -> str:
@@ -243,23 +333,28 @@ def get_gpu() -> list[str]:
     for line in out.splitlines():
         low = line.lower()
         if "vga" in low or "3d controller" in low or "display controller" in low:
-            # берём имя после ': '
             name = line.split(": ", 1)[-1].strip()
-            # чистим от мусора
-            for junk in ("(rev a1)", "(rev c6)", "Corporation", "Advanced Micro Devices, Inc."):
+            for junk in ("(rev a1)", "(rev c6)", "Corporation",
+                         "Advanced Micro Devices, Inc."):
                 name = name.replace(junk, "")
             name = " ".join(name.split())
-            # короткое имя
             name = name.replace("[AMD/ATI]", "").strip()
             if name:
                 gpus.append(name)
     return gpus
 
 
+def get_gpu_driver() -> str | None:
+    out = _run(["nvidia-smi", "--query-gpu=driver_version",
+                "--format=csv,noheader"])
+    if out:
+        return out.splitlines()[0].strip()
+    return None
+
+
 def get_temps() -> dict[str, float]:
     """Температуры CPU/GPU в °C."""
     temps = {}
-    # k10temp (AMD)
     out = _run(["sensors"])
     if out:
         for line in out.splitlines():
@@ -272,7 +367,6 @@ def get_temps() -> dict[str, float]:
                         temps[label] = val
                     except ValueError:
                         pass
-    # fallback через sysfs
     if not temps:
         for z in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
             t = _read(str(z / "temp"))
@@ -285,18 +379,69 @@ def get_temps() -> dict[str, float]:
     return temps
 
 
+def get_cpu_temp() -> float | None:
+    """Температура CPU: Tctl (AMD) / Package (Intel) / первая доступная."""
+    temps = get_temps()
+    for label, val in temps.items():
+        low = label.lower()
+        if "tctl" in low or "package" in low or "cpu" in low:
+            return val
+    for label, val in temps.items():
+        if "k10temp" in label.lower() or "coretemp" in label.lower():
+            return val
+    if temps:
+        return next(iter(temps.values()))
+    return None
+
+
+def get_gpu_temp() -> float | None:
+    out = _run(["nvidia-smi", "--query-gpu=temperature.gpu",
+                "--format=csv,noheader"])
+    if out:
+        try:
+            return float(out.splitlines()[0].strip())
+        except ValueError:
+            return None
+    return None
+
+
 def get_terminal() -> str:
+    """Настоящий терминал: TERM_PROGRAM → обход дерева процессов вверх."""
     term = os.environ.get("TERM_PROGRAM", "")
     if term:
         return term
-    # fallback по процессу
+    known = ("foot", "alacritty", "kitty", "ghostty", "wezterm-gui", "wezterm",
+             "xterm", "konsole", "gnome-terminal-server", "gnome-terminal",
+             "st", "urxvt", "terminator", "tilix", "ptyxis", "contour", "wave")
     try:
-        ppid = os.getppid()
-        comm = _read(f"/proc/{ppid}/comm")
-        if comm:
-            return comm
+        pid = os.getppid()
+        first_comm = _read(f"/proc/{pid}/comm")
+        for _ in range(8):
+            if pid <= 1:
+                break
+            comm = _read(f"/proc/{pid}/comm")
+            cmd = (_read(f"/proc/{pid}/cmdline") or "").replace("\0", " ").strip()
+            # basename первого аргумента cmdline — защита от ложных совпадений
+            argv0 = os.path.basename(cmd.split()[0]) if cmd.split() else ""
+            for cand in {comm or "", argv0}:
+                cl = cand.lower()
+                if cl in known:
+                    return cl
+            # kitty/ghostty иногда прячутся в аргументах вида kitty --session
+            for k in ("kitty", "ghostty", "wezterm", "alacritty", "foot"):
+                if k in cmd.lower().split():
+                    return k
+            stat = _read(f"/proc/{pid}/stat")
+            if not stat:
+                break
+            rparen = stat.rfind(")")
+            fields = stat[rparen + 2:].split()
+            pid = int(fields[1])
     except Exception:
         pass
+    # ничего знакомого не нашли — покажем ближайшего родителя (обёртку)
+    if first_comm:
+        return first_comm
     return os.environ.get("TERM", "?")
 
 
@@ -324,6 +469,23 @@ def get_distro_icon() -> str:
     return icons.get(distro, "󰣇")
 
 
+def get_theme() -> dict[str, str]:
+    """GTK-тема, иконки, шрифт, курсор."""
+    theme = {}
+    for key, schema, setting in (
+        ("gtk", "org.gnome.desktop.interface", "gtk-theme"),
+        ("icons", "org.gnome.desktop.interface", "icon-theme"),
+        ("font", "org.gnome.desktop.interface", "font-name"),
+        ("cursor", "org.gnome.desktop.interface", "cursor-theme"),
+    ):
+        out = _run(["gsettings", "get", schema, setting])
+        if out:
+            val = out.strip().strip("'")
+            if val:
+                theme[key] = val
+    return theme
+
+
 # ---------------------------------------------------------------- прогресс-бары
 
 BAR_FILLED = "━"      # ━
@@ -335,13 +497,12 @@ def bar(pct: float, width: int = 10) -> str:
     pct = max(0.0, min(100.0, pct))
     filled = int(pct / 100 * width)
     bar_str = BAR_FILLED * filled + BAR_EMPTY * (width - filled)
-    # цвет по загрузке
     if pct < 50:
-        color = 78      # зелёный
+        color = 78
     elif pct < 80:
-        color = 220     # жёлтый
+        color = 220
     else:
-        color = 196     # красный
+        color = 196
     return fg(color) + bar_str + RESET
 
 
@@ -350,9 +511,8 @@ def uptime_bar(seconds: float, max_days: float = 7.0, width: int = 10) -> str:
     pct = min(100.0, seconds / (max_days * 86400) * 100)
     filled = int(pct / 100 * width)
     if filled == 0 and pct > 0:
-        filled = 1          # минимум 1 клетка если система работает
+        filled = 1
     bar_str = BAR_FILLED * filled + BAR_EMPTY * (width - filled)
-    # цвет: молодой uptime = зелёный, старый = жёлтый/красный
     if pct < 30:
         color = 78
     elif pct < 70:
@@ -377,10 +537,8 @@ def get_interfaces() -> list[tuple[str, str, str]]:
         name = parts[0]
         status = parts[1]
         ip = parts[2] if len(parts) > 2 else ""
-        # пропускаем loopback и неактивные
         if name == "lo" or status not in ("UP", "UNKNOWN"):
             continue
-        # UNKNOWN с IP = активен (типично для tun)
         if status == "UNKNOWN" and not ip:
             continue
         ifaces.append((name, status, ip))
@@ -419,9 +577,7 @@ def get_external_info() -> dict | None:
 
 
 def get_speed() -> tuple[float, float] | None:
-    """Быстрый спидтест: скачивает 10MB с Cloudflare, возвращает (Mbps, сек).
-    Возвращает None при ошибке/таймауте."""
-    import time
+    """Быстрый спидтест: скачивает 10MB с Cloudflare, возвращает (Mbps, сек)."""
     url = "https://speed.cloudflare.com/__down?bytes=10000000"
     try:
         start = time.monotonic()
@@ -463,7 +619,6 @@ def get_uptime_seconds() -> float:
 
 
 def get_swap() -> tuple[float, float] | None:
-    """(used, total) swap в GiB или None если нет."""
     info = _read("/proc/meminfo")
     if not info:
         return None
@@ -481,7 +636,6 @@ def get_swap() -> tuple[float, float] | None:
 
 
 def get_load() -> str:
-    """Load average (1/5/15 мин) из /proc/loadavg."""
     raw = _read("/proc/loadavg")
     if not raw:
         return "?"
@@ -490,7 +644,6 @@ def get_load() -> str:
 
 
 def get_processes() -> int:
-    """Число запущенных процессов."""
     try:
         return len([d for d in os.listdir("/proc") if d.isdigit()])
     except Exception:
@@ -498,7 +651,6 @@ def get_processes() -> int:
 
 
 def get_parent_process() -> str:
-    """Родительский процесс (чем запущен flamfetch)."""
     try:
         ppid = os.getppid()
         comm = _read(f"/proc/{ppid}/comm")
@@ -508,9 +660,10 @@ def get_parent_process() -> str:
 
 
 # ============================================================ разделы
+#
+# Пункт: (ключ, значение, процент_для_бара | None)
 
 def _parse_mem() -> tuple[float, float, float]:
-    """(used, total, pct) в GiB."""
     info = _read("/proc/meminfo")
     if not info:
         return 0.0, 0.0, 0.0
@@ -527,7 +680,6 @@ def _parse_mem() -> tuple[float, float, float]:
 
 
 def _parse_disk(path: str = "/") -> tuple[float, float, float]:
-    """(used, total, pct) в GiB."""
     try:
         usage = shutil.disk_usage(path)
         total = usage.total / 1024 ** 3
@@ -538,8 +690,29 @@ def _parse_disk(path: str = "/") -> tuple[float, float, float]:
         return 0.0, 0.0, 0.0
 
 
+def _is_separate_mount(path: str) -> bool:
+    """True, если путь — отдельное УСТРОЙСТВО (btrfs-subvol того же device не считается)."""
+    try:
+        mounts = _read("/proc/mounts") or ""
+        root_dev = None
+        path_dev = None
+        for line in mounts.splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            dev, target = parts[0], parts[1]
+            if target == "/":
+                root_dev = dev
+            if target == path:
+                path_dev = dev
+        if path_dev and root_dev and path_dev != root_dev:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _parse_battery() -> tuple[int, str] | None:
-    """(percent, status) или None."""
     for b in Path("/sys/class/power_supply").glob("BAT*"):
         cap = _read(str(b / "capacity"))
         status = _read(str(b / "status")) or ""
@@ -551,28 +724,28 @@ def _parse_battery() -> tuple[int, str] | None:
     return None
 
 
-def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, str]]]]:
-    """Возвращает [(заголовок, [(ключ, значение), ...]), ...]
+def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, str, float | None]]]]:
+    """Возвращает [(заголовок, [(ключ, значение, бар%), ...]), ...]
     with_speed=True — делает спидтест (медленно, ~2-8 сек)."""
     host, os_name = get_host()
     icon = get_distro_icon()
 
-    # температура CPU
-    temps = get_temps()
-    cpu_temp = None
-    for label, val in temps.items():
-        if any(x in label.lower() for x in ("tctl", "cpu", "core", "k10temp", "temp1")):
-            cpu_temp = val
-            break
-    if cpu_temp is None and temps:
-        cpu_temp = next(iter(temps.values()))
+    gpus = get_gpu()
+    cpu_temp = get_cpu_temp()
+    gpu_temp = get_gpu_temp()
+    gpu_drv = get_gpu_driver()
+    wm_ver = get_wm_version()
+    gov = get_cpu_governor()
+    board = get_board()
+    bios = get_bios()
+    mon = get_monitor_name()
+    res = get_resolution()
+    theme = get_theme()
 
-    # батарея
     bat = _parse_battery()
-    # память / диск
     mu, mt, mpct = _parse_mem()
     du, dt, dpct = _parse_disk("/")
-    # uptime
+    hu, ht, hpct = _parse_disk("/home")
     up_sec = get_uptime_seconds()
 
     # ===== сеть =====
@@ -581,100 +754,160 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
     ext = get_external_info()
     speed = get_speed() if with_speed else None
 
-    sections = [
-        ("◈ Система", [
-            ("OS", f"{icon} {os_name}"),
-            ("Host", host),
-            ("Kernel", get_kernel()),
-            ("Uptime", f"{get_uptime()} {uptime_bar(up_sec)}"),
-        ]),
-        ("◈ Оборудование", [
-            ("CPU", get_cpu()),
-            ("GPU", get_gpu()[0] if get_gpu() else "?"),
-            ("DE", get_de()),
-            ("Terminal", get_terminal()),
-            ("Shell", get_shell()),
-            ("Launched", get_parent_process()),
-        ]),
-        ("◈ Ресурсы", [
-            ("Memory", f"{mu:.1f}/{mt:.1f}GiB {bar(mpct)}"),
-            ("Disk /", f"{du:.0f}/{dt:.0f}GiB {bar(dpct)}"),
-        ]),
+    de = get_de()
+    if wm_ver and "Hyprland" in de:
+        de = f"{de} {wm_ver}"
+
+    # ---------- ◈ Система ----------
+    sys_items = [
+        ("OS", f"{icon} {os_name}", None),
+        ("Host", host, None),
+        ("Kernel", get_kernel(), None),
+        ("Uptime", get_uptime(), min(100.0, up_sec / (7 * 86400) * 100)),
     ]
+    if board:
+        sys_items.append(("Board", board, None))
+    if bios:
+        sys_items.append(("BIOS", bios, None))
+    sys_items.append(("Locale", get_locale(), None))
+    sys_items.append(("Init", get_init(), None))
+    sys_items.append(("Arch", get_arch(), None))
 
-    # опциональные — оборудование
-    res = get_resolution()
-    if res:
-        sections[1][1].append(("Display", res))
-    if len(get_gpu()) > 1:
-        sections[1][1].append(("GPU2", get_gpu()[1]))
+    # ---------- ◈ Оборудование ----------
+    hw_items = [
+        ("CPU", get_cpu(), None),
+    ]
+    if gov:
+        hw_items.append(("Governor", gov, None))
+    if gpus:
+        hw_items.append(("GPU", gpus[0], None))
+    if len(gpus) > 1:
+        hw_items.append(("iGPU", gpus[1], None))
+    if gpu_drv:
+        hw_items.append(("Driver", gpu_drv, None))
     if cpu_temp is not None:
-        sections[1][1].append(("Temp", f"{cpu_temp:.0f}°C"))
+        hw_items.append(("CPU Temp", f"{cpu_temp:.0f}°C", None))
+    if gpu_temp is not None:
+        hw_items.append(("GPU Temp", f"{gpu_temp:.0f}°C", None))
+    if res:
+        disp = res + (f" ({mon})" if mon else "")
+        hw_items.append(("Display", disp, None))
+    hw_items.append(("DE", de, None))
+    hw_items.append(("Terminal", get_terminal(), None))
+    shell = get_shell()
+    shv = get_shell_version()
+    hw_items.append(("Shell", f"{shell} {shv}" if shv else shell, None))
+    hw_items.append(("Launched", get_parent_process(), None))
 
-    # ===== раздел Сеть =====
-    net_items = []
-    # активные интерфейсы
-    for name, status, ip in ifaces:
-        if name in vpns:
-            continue  # VPN покажем отдельно
-        tag = "VPN" if any(v in name for v in vpns) else name
-        ip_short = ip.split("/")[0] if ip else "-"
-        net_items.append(("Iface", f"{tag} ({ip_short})"))
-    # VPN-статус
-    if vpns:
-        vpn_name = vpns[0]
-        if ext:
-            net_items.append(("VPN", f"✓ {vpn_name} → {ext['country']} ({ext['city']})"))
-        else:
-            net_items.append(("VPN", f"✓ {vpn_name}"))
-        # подсказка что WAN через VPN
-        net_items.append(("Note", "WAN IP / страна — через VPN"))
-    else:
-        if ext:
-            net_items.append(("VPN", f"✗ off → {ext['country']} ({ext['city']})"))
-    # внешний IP
-    if ext:
-        net_items.append(("WAN IP", ext["ip"]))
-    # скорость
-    if speed:
-        mbps, elapsed = speed
-        net_items.append(("Speed", f"↓ {mbps:.0f} Mbps ({elapsed:.1f}s)"))
-    elif with_speed:
-        net_items.append(("Speed", "недоступен"))
-
-    if net_items:
-        sections.append(("◈ Сеть", net_items))
-
-    # батарея, IP, пакеты — в Ресурсы
+    # ---------- ◈ Ресурсы ----------
+    swap = get_swap()
+    res_items = [
+        ("Memory", f"{mu:.1f}/{mt:.1f}GiB", mpct),
+        ("Swap", f"{swap[0]:.1f}/{swap[1]:.1f}GiB" if swap else None,
+         (100 * swap[0] / swap[1]) if swap else None),
+        ("Disk /", f"{du:.0f}/{dt:.0f}GiB", dpct),
+    ]
+    # /home показываем только если это реально отдельная точка монтирования
+    if _is_separate_mount("/home"):
+        res_items.append(("Disk /home", f"{hu:.0f}/{ht:.0f}GiB", hpct))
     if bat:
         pct, status = bat
         icon_b = "⚡" if status == "Charging" else "🔋"
-        sections[2][1].append(("Battery", f"{pct}% {icon_b} {bar(pct)}"))
+        res_items.append(("Battery", f"{pct}% {icon_b}", float(pct)))
     pkgs = get_packages()
     if pkgs != "?":
-        sections[2][1].append(("Packages", pkgs))
-    # swap
-    swap = get_swap()
-    if swap:
-        su, st = swap
-        spct = 100 * su / st if st else 0
-        sections[2][1].append(("Swap", f"{su:.1f}/{st:.1f}GiB {bar(spct)}"))
-    # load + процессы
-    sections[2][1].append(("Load", get_load()))
+        res_items.append(("Packages", pkgs, None))
+    res_items.append(("Load", get_load(), None))
     procs = get_processes()
     if procs:
-        sections[2][1].append(("Processes", str(procs)))
+        res_items.append(("Processes", str(procs), None))
 
-    # ===== раздел Сборка =====
-    binfo = get_build_info()
-    build_items = [
-        ("OS ID", binfo["id"]),
-        ("Version", binfo["version"]),
-        ("Build", binfo["build_id"]),
+    sections = [
+        ("◈ Система", sys_items),
+        ("◈ Оборудование", hw_items),
+        ("◈ Ресурсы", res_items),
     ]
-    sections.append(("◈ Сборка", build_items))
+
+    # ---------- ◈ Сеть ----------
+    net_items = []
+    for name, status, ip in ifaces:
+        if name in vpns:
+            continue
+        ip_short = ip.split("/")[0] if ip else "-"
+        net_items.append(("Iface", f"{name} ({ip_short})", None))
+    if vpns:
+        vpn_name = vpns[0]
+        if ext:
+            net_items.append(("VPN", f"✓ {vpn_name} → {ext['country']} ({ext['city']})", None))
+        else:
+            net_items.append(("VPN", f"✓ {vpn_name}", None))
+        net_items.append(("Note", "WAN IP / страна — через VPN", None))
+    else:
+        if ext:
+            net_items.append(("VPN", f"✗ off → {ext['country']} ({ext['city']})", None))
+    if ext:
+        net_items.append(("WAN IP", ext["ip"], None))
+    if speed:
+        mbps, elapsed = speed
+        net_items.append(("Speed", f"↓ {mbps:.0f} Mbps ({elapsed:.1f}s)", None))
+    elif with_speed:
+        net_items.append(("Speed", "недоступен", None))
+    if net_items:
+        sections.append(("◈ Сеть", net_items))
+
+    # ---------- ◈ Тема ----------
+    theme_items = []
+    if theme.get("gtk"):
+        theme_items.append(("GTK", theme["gtk"], None))
+    if theme.get("icons"):
+        theme_items.append(("Icons", theme["icons"], None))
+    if theme.get("font"):
+        theme_items.append(("Font", theme["font"], None))
+    if theme.get("cursor"):
+        theme_items.append(("Cursor", theme["cursor"], None))
+    if theme_items:
+        sections.append(("◈ Тема", theme_items))
+
+    # ---------- ◈ Сборка ----------
+    binfo = get_build_info()
+    sections.append(("◈ Сборка", [
+        ("OS ID", binfo["id"], None),
+        ("Version", binfo["version"], None),
+        ("Build", binfo["build_id"], None),
+    ]))
 
     return sections
+
+
+# ============================================================ общий рендер инфо
+
+KEY_WIDTH = 12
+
+
+def _format_line(key: str, value: str, pct: float | None,
+                 bar_kind: str | None = None) -> str:
+    """Строка пункта в статичном виде: цветной ключ + значение + бар."""
+    kc = item_color(key)
+    line = fg(kc) + BOLD + f"{key:<{KEY_WIDTH}}" + RESET
+    line += fg(COLOR_DIM) + "│ " + RESET
+    line += fg(COLOR_VALUE) + (value or "-")
+    if pct is not None:
+        if bar_kind == "uptime":
+            line += " " + uptime_bar(pct / 100 * 7 * 86400)
+        else:
+            line += " " + bar(pct)
+    return line
+
+
+def render_info_static(sections, indent: str = "") -> None:
+    """Печать инфоблока (для --no-logo)."""
+    for si, (title, items) in enumerate(sections):
+        sc = SECTION_COLORS[si % len(SECTION_COLORS)]
+        print(fg(sc) + BOLD + f"{indent}{title}" + RESET)
+        for key, value, pct in items:
+            print(indent + _format_line(key, value, pct,
+                                        bar_kind="uptime" if key == "Uptime" else None))
+        print()
 
 
 # ============================================================ рендер (статика)
@@ -686,43 +919,35 @@ def render_static(with_speed: bool = False) -> None:
     user = os.environ.get("USER", "user")
     host = socket.gethostname()
 
-    # рисуем арт с огненным градиентом
     art_lines = []
     for ri, line in enumerate(art):
         t = ri / max(len(art) - 1, 1)
         ct = 0.35 + 0.65 * (1.0 - t)
         art_lines.append(fg(fire_color(ct)) + line)
 
-    # заголовок user@host под артом
     art_lines.append("")
     art_lines.append(fg(196) + BOLD + " " * 2 + user + RESET
                      + fg(208) + "@" + RESET
                      + fg(226) + BOLD + host + RESET)
 
-    # подпись
     art_lines.append("")
     art_lines.append(fg(fire_color(0.3)) + " " * 6 + "by lostflam")
 
-    # инфо-блок
-    info_lines = []
-    info_lines.append("")
-    for title, items in sections:
-        info_lines.append(fg(COLOR_HEADER) + BOLD + f"  {title}" + RESET)
-        for k, v in items:
-            info_lines.append(
-                fg(COLOR_KEY) + f"  {k:<11}" + RESET
-                + fg(COLOR_DIM) + "│ " + RESET
-                + fg(COLOR_VALUE) + v
-            )
+    info_lines = [""]
+    for si, (title, items) in enumerate(sections):
+        sc = SECTION_COLORS[si % len(SECTION_COLORS)]
+        info_lines.append(fg(sc) + BOLD + f"  {title}" + RESET)
+        for key, value, pct in items:
+            info_lines.append("  " + _format_line(
+                key, value, pct,
+                bar_kind="uptime" if key == "Uptime" else None))
         info_lines.append("")
 
-    # склеиваем арт и инфу рядом
     total = max(len(art_lines), len(info_lines))
-    # ширина арта для выравнивания
-    art_w = max((len(l) for l in art_lines), default=0)
-    # убираем ANSI при подсчёте — грубая оценка по видимому тексту
+
+    import re
+
     def visible_len(s):
-        import re
         return len(re.sub(r"\033\[[0-9;]*m", "", s))
 
     art_w = max(visible_len(l) for l in art_lines)
@@ -731,7 +956,6 @@ def render_static(with_speed: bool = False) -> None:
         left = art_lines[i] if i < len(art_lines) else ""
         right = info_lines[i] if i < len(info_lines) else ""
         pad = " " * max(0, art_w - visible_len(left) + 4)
-        # добиваем цвет, чтобы не течёк на инфу
         if left:
             print(left + RESET + pad + right)
         else:
@@ -789,6 +1013,61 @@ class Particle:
         return GLITCH_COLORS[int(t * (len(GLITCH_COLORS) - 1)) % len(GLITCH_COLORS)]
 
 
+# ---------------------------------------------------------------- модель инфоблока
+
+class InfoRow:
+    """Строка инфоблока: заголовок раздела, пункт или пустая."""
+    __slots__ = ("kind", "key", "value", "pct", "bar_kind", "color", "start")
+
+    def __init__(self, kind, key="", value="", pct=None, bar_kind=None,
+                 color=None, start=0):
+        self.kind = kind            # 'header' | 'kv' | 'blank'
+        self.key = key
+        self.value = value
+        self.pct = pct
+        self.bar_kind = bar_kind
+        self.color = color
+        self.start = start          # кадр, на котором строка начинает печататься
+
+
+def build_info_rows(sections) -> list[InfoRow]:
+    rows = []
+    frame = 6
+    for si, (title, items) in enumerate(sections):
+        sec_color = SECTION_COLORS[si % len(SECTION_COLORS)]
+        rows.append(InfoRow("header", value=title, color=sec_color, start=frame))
+        frame += 2
+        kv_i = 0
+        for key, value, pct in items:
+            if value is None:
+                continue
+            rows.append(InfoRow("kv", key=key, value=value, pct=pct,
+                                bar_kind="uptime" if key == "Uptime" else None,
+                                color=item_color(key), start=frame))
+            # каскад: чётные строки стартуют сразу, нечётные — на кадр позже
+            frame += 1 if kv_i % 2 == 0 else 0
+            kv_i += 1
+        rows.append(InfoRow("blank", start=frame))
+        frame += 1
+    return rows
+
+
+def _bar_cells(pct: float, width: int) -> list[tuple[str, int]]:
+    """Ячейки бара: [(символ, цвет), ...] — цвет по загрузке."""
+    pct = max(0.0, min(100.0, pct))
+    filled = int(pct / 100 * width)
+    if filled == 0 and pct > 0:
+        filled = 1
+    if pct < 50:
+        color = 78
+    elif pct < 80:
+        color = 220
+    else:
+        color = 196
+    cells = [(BAR_FILLED, color)] * filled + [(BAR_EMPTY, COLOR_DIM)] * (width - filled)
+    return cells
+
+
 def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     art = get_art()
     flam = art[:5]
@@ -800,13 +1079,14 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     except OSError:
         cols, rows = 120, 30
 
-    need = art_h + 9
-    if rows < need:
-        if intro:
-            rows = need
-        else:
-            print(f"Терминал мал: нужно ~{need} строк, есть {rows}.")
-            return
+    sections = build_sections(with_speed=with_speed)
+    info_rows = build_info_rows(sections)
+
+    # сколько строк нужно под инфоблок (+ логотип/подписи слева)
+    need_rows = len(info_rows) + 3
+    if rows < need_rows and not intro:
+        print(f"Терминал мал: нужно ~{need_rows} строк, есть {rows}.")
+        return
 
     particles = []
     frame = 0
@@ -817,18 +1097,11 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     flam_rows = list(range(2, 2 + len(flam)))
     quency_rows = list(range(2 + len(flam) + 1, 2 + len(flam) + 1 + len(quency)))
 
-    # ===== собираем инфо-блок один раз =====
-    sections = build_sections(with_speed=with_speed)
-    info_text = []
-    for title, items in sections:
-        info_text.append((None, None, f"{title}", "header"))
-        for k, v in items:
-            info_text.append((k, v, None, "kv"))
-        info_text.append((None, None, "", "blank"))
-
-    # ===== статичная ширина колонки арта =====
     art_w = max(len(l) for l in art)
-    info_col = art_w + 6          # отступ между артом и инфой
+    info_col = art_w + 6
+
+    # глитч-состояние: {индекс строки: кадр начала}
+    glitch_rows = {}
 
     sys.stdout.write("\033[2J\033[H" + "\033[?25l")
     sys.stdout.flush()
@@ -985,7 +1258,6 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                 for i, ch in enumerate(header):
                     if tx + i < cols:
                         canvas[ty][tx + i] = ch
-                        # пользователь красный, @ оранжевый, хост жёлтый
                         if i < len(user):
                             ccolor[ty][tx + i] = 196
                         elif ch == "@":
@@ -993,36 +1265,99 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                         else:
                             ccolor[ty][tx + i] = 226
 
-            # ===== инфо-блок: кладём в canvas справа =====
-            info_y = 2
-            for kind_key, kind_val, title, kind in info_text:
-                if info_y >= rows:
+            # ===== инфоблок: печатающая машинка + shimmer + бары + скан-полоса =====
+            # scanning-полоса медленно идёт вниз по инфоблоку
+            scan_y = 2 + ((frame * 0.55) % (len(info_rows) + 10))
+
+            # случайные цифровые глитчи на значениях
+            if frame % 61 == 0 and info_rows:
+                idx = random.randrange(len(info_rows))
+                if info_rows[idx].kind == "kv":
+                    glitch_rows[idx] = frame
+
+            for ri, row in enumerate(info_rows):
+                y = 2 + ri
+                if y >= rows:
                     break
-                if kind == "header":
-                    # заголовок раздела
-                    line = f"{title}"
-                    for i, ch in enumerate(line):
-                        if info_col + i < cols:
-                            canvas[info_y][info_col + i] = ch
-                            ccolor[info_y][info_col + i] = COLOR_HEADER
-                            cattr[info_y][info_col + i] = BOLD
-                elif kind == "kv":
-                    key = (kind_key or "")[:11].ljust(11)
-                    line = f"{key}│ {kind_val}"
-                    for i, ch in enumerate(line):
-                        if info_col + i < cols:
-                            c = ch
-                            col = 0
-                            if i < 11:
-                                col = COLOR_KEY
-                            elif i == 11:
-                                col = COLOR_DIM
-                            else:
-                                col = COLOR_VALUE
-                            if c != " ":
-                                canvas[info_y][info_col + i] = c
-                                ccolor[info_y][info_col + i] = col
-                info_y += 1
+                st = row.start
+                if frame < st:
+                    continue
+                prog = (frame - st + 1) * 8        # символов за кадр (быстрая печать)
+                scanned = abs(y - scan_y) < 1.3    # полоса проходит по строке
+                glitched = glitch_rows.get(ri, 0) and frame - glitch_rows[ri] < 3
+
+                if row.kind == "blank":
+                    continue
+
+                if row.kind == "header":
+                    title = row.value
+                    n = min(len(title), int(prog))
+                    for i in range(n):
+                        x = info_col + i
+                        if x >= cols:
+                            break
+                        # огненный градиент, бегущий по заголовку
+                        t = (i / max(len(title) - 1, 1) + frame * 0.04) % 1.0
+                        canvas[y][x] = title[i]
+                        ccolor[y][x] = fire_color(0.35 + 0.65 * t)
+                        cattr[y][x] = BOLD
+                    # курсор печатающей машинки
+                    if prog < len(title):
+                        x = info_col + int(prog)
+                        if x < cols and canvas[y][x] == " ":
+                            canvas[y][x] = "▌"
+                            ccolor[y][x] = COLOR_CURSOR
+                    continue
+
+                # ---- kv-строка ----
+                key = row.key
+                value = row.value or "-"
+                pct = row.pct
+                base = row.color
+                # shimmer: пульс яркости ключа
+                attr = BOLD if math.sin(frame * 0.12 + ri * 0.9) > -0.3 else ""
+                # свежая строка вспыхивает белым
+                fresh = frame - st < 5
+                key_col = 255 if fresh else base
+
+                seq = [(key.ljust(KEY_WIDTH), key_col, attr),
+                       ("│ ", COLOR_DIM, ""),
+                       (value, COLOR_VALUE, "")]
+                pos = 0
+                for text, col, at in seq:
+                    for j, ch in enumerate(text):
+                        gp = pos + j
+                        if gp >= prog:
+                            break
+                        x = info_col + gp
+                        if x >= cols:
+                            break
+                        c = ch
+                        cc = col
+                        if scanned and c != " ":
+                            cc = 255          # полоса подсвечивает строку
+                        if glitched and c != " " and random.random() < 0.4:
+                            c = random.choice(GLITCH_GLYPHS)
+                            cc = random.choice([201, 51, 196])
+                        if c != " ":
+                            canvas[y][x] = c
+                            ccolor[y][x] = cc
+                            if at:
+                                cattr[y][x] = at
+                    pos += len(text)
+
+                # бар: растёт от 0 до целевого значения
+                if pct is not None and pos + 1 < prog:
+                    grow = min(1.0, (prog - pos - 1) / 22.0)
+                    fill_pct = (pct or 0) * grow
+                    bx = info_col + pos + 1
+                    for sym, bcol in _bar_cells(fill_pct, 10):
+                        if bx >= cols:
+                            break
+                        if sym != " ":
+                            canvas[y][bx] = sym
+                            ccolor[y][bx] = 255 if (scanned and sym == BAR_FILLED) else bcol
+                        bx += 1
 
             # ===== вывод кадра =====
             out = ["\033[H"]
@@ -1085,17 +1420,12 @@ def main():
                         help="только системная информация, без логотипа")
     parser.add_argument("--speed", "-s", action="store_true",
                         help="сделать быстрый спидтест (добавляет ~2-8 сек)")
+    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.3.0")
     args = parser.parse_args()
 
     if args.no_logo:
         sections = build_sections(with_speed=args.speed)
-        for title, items in sections:
-            print(fg(COLOR_HEADER) + BOLD + title + RESET)
-            for k, v in items:
-                print(fg(COLOR_KEY) + f"{k:<12}" + RESET
-                      + fg(COLOR_DIM) + "│ " + RESET
-                      + fg(COLOR_VALUE) + v)
-            print()
+        render_info_static(sections)
         return
 
     if args.animate:

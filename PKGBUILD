@@ -1,15 +1,18 @@
 # Maintainer: lostflam <LOSTFlam@users.noreply.github.com>
 
 pkgname=flamfetch
-pkgver=1.2.0
+pkgver=1.3.0
 pkgrel=1
 pkgdesc="Fiery animated system fetch with live flame and glitch effects"
 arch=('any')
 url="https://github.com/LOSTFlam/FlamFetch"
 license=('MIT')
 depends=('python' 'python-pyfiglet')
-optdepends=('hyprland: display resolution detection')
-source=("${pkgname}-${pkgver}.tar.gz::https://github.com/LOSTFlam/FlamFetch/archive/v1.2.0.tar.gz")
+optdepends=('hyprland: display resolution detection'
+            'gsettings: GTK theme detection'
+            'nvidia-utils: GPU driver/temperature'
+            'lm_sensors: CPU temperature')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/LOSTFlam/FlamFetch/archive/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
 package() {
