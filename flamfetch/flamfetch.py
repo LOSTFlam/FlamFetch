@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.8.3
+Версия: 1.9.0
 """
 
 import argparse
@@ -56,6 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
+VERSION = "1.9.0"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -63,6 +64,44 @@ def T(text: str) -> str:
     if CURRENT_LANG == "ru" and text in RU:
         return RU[text]
     return text
+
+# ============================================================ пользовательский конфиг
+#
+# Необязательный ~/.config/flamfetch/config.toml (или .ini-подобный):
+#   banner_text = HELLO
+#   lang = ru
+#   no_banner = true
+# Ключи из конфига читаются через get_config(); флаги CLI имеют приоритет.
+
+CONFIG_PATH = None    # вычисляется лениво в get_config (HOME определён ниже)
+
+_CONFIG_CACHE = None
+
+
+def get_config() -> dict:
+    """Читает конфиг (кешируется). Пустой dict если файла нет."""
+    global _CONFIG_CACHE, CONFIG_PATH
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
+    cfg = {}
+    if CONFIG_PATH is None:
+        if IS_WINDOWS:
+            base = Path(os.environ.get("APPDATA", str(Path.home())))
+        else:
+            base = HOME / ".config"
+        CONFIG_PATH = base / "flamfetch" / "config.toml"
+    try:
+        if CONFIG_PATH.exists():
+            for line in CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    _CONFIG_CACHE = cfg
+    return cfg
 
 
 RU = {
@@ -116,6 +155,7 @@ RU = {
     "Note": "Заметка",
     "WAN IP": "Внеш. IP",
     "Speed": "Скорость",
+    "Ping": "Пинг",
     # ключи — Тема
     "GTK": "GTK",
     "Icons": "Иконки",
@@ -844,6 +884,7 @@ KEY_ICONS = {
     "Note": "\uf05a",
     "WAN IP": "\uf0c0",
     "Speed": "\uf0e4",
+    "Ping": "\uf0e4",
     "GTK": "\uf1fc",
     "Icons": "\uf03e",
     "Font": "\uf031",
@@ -1132,10 +1173,78 @@ BANNER_ART = [
     "╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚══════╝   ╚═╝    ╚═════╝╚═╝  ╚═╝ ",
 ]
 
+# --- настройки баннера (--banner / --no-banner / конфиг) ---
+BANNER_TEXT = "FLAMFETCH"    # None → стандартный BANNER_ART
+BANNER_ENABLED = True
+
 
 def get_banner_art() -> list[str]:
-    """Блочный баннер FLAMFETCH — строки фиксированной ширины."""
+    """Блочный баннер: стандартный FLAMFETCH или кастомный текст
+    (--banner TEXT). Пустой список = баннер выключен."""
+    if not BANNER_ENABLED:
+        return []
+    if BANNER_TEXT and BANNER_TEXT != "FLAMFETCH":
+        return text_to_banner(BANNER_TEXT)
     return BANNER_ART
+
+
+# --- блочный шрифт 5x5 для произвольного текста (--banner TEXT) ---
+#
+# Компактнее ANSI Shadow (5 строк вместо 6, буквы 5 клеток) — влезает
+# в любую ширину терминала. Латинские буквы, цифры, пробел и дефис.
+
+_BLOCK_FONT = {
+    "A": [" █ ", "█ █", "███", "█ █", "█ █"],
+    "B": ["██ ", "█ █", "██ ", "█ █", "██ "],
+    "C": [" ██", "█  ", "█  ", "█  ", " ██"],
+    "D": ["██ ", "█ █", "█ █", "█ █", "██ "],
+    "E": ["███", "█  ", "██ ", "█  ", "███"],
+    "F": ["███", "█  ", "██ ", "█  ", "█  "],
+    "G": [" ██", "█  ", "█ █", "█ █", " ██"],
+    "H": ["█ █", "█ █", "███", "█ █", "█ █"],
+    "I": ["███", " █ ", " █ ", " █ ", "███"],
+    "J": ["  █", "  █", "  █", "█ █", " █ "],
+    "K": ["█ █", "█ █", "██ ", "█ █", "█ █"],
+    "L": ["█  ", "█  ", "█  ", "█  ", "███"],
+    "M": ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
+    "N": ["█  █", "██ █", "█ ██", "█  █", "█  █"],
+    "O": [" █ ", "█ █", "█ █", "█ █", " █ "],
+    "P": ["██ ", "█ █", "██ ", "█  ", "█  "],
+    "Q": [" █ ", "█ █", "█ █", "██ ", " ██"],
+    "R": ["██ ", "█ █", "██ ", "█ █", "█ █"],
+    "S": [" ██", "█  ", " █ ", "  █", "██ "],
+    "T": ["███", " █ ", " █ ", " █ ", " █ "],
+    "U": ["█ █", "█ █", "█ █", "█ █", "███"],
+    "V": ["█ █", "█ █", "█ █", "█ █", " █ "],
+    "W": ["█   █", "█   █", "█ █ █", "██ ██", "█   █"],
+    "X": ["█ █", "█ █", " █ ", "█ █", "█ █"],
+    "Y": ["█ █", "█ █", " █ ", " █ ", " █ "],
+    "Z": ["███", "  █", " █ ", "█  ", "███"],
+    "0": [" █ ", "█ █", "█ █", "█ █", " █ "],
+    "1": [" █ ", "██ ", " █ ", " █ ", "███"],
+    "2": ["██ ", "  █", " █ ", "█  ", "███"],
+    "3": ["██ ", "  █", " █ ", "  █", "██ "],
+    "4": ["█ █", "█ █", "███", "  █", "  █"],
+    "5": ["███", "█  ", "██ ", "  █", "██ "],
+    "6": [" ██", "█  ", "███", "█ █", "███"],
+    "7": ["███", "  █", " █ ", " █ ", " █ "],
+    "8": ["███", "█ █", "███", "█ █", "███"],
+    "9": ["███", "█ █", "███", "  █", "██ "],
+    "-": ["   ", "   ", "███", "   ", "   "],
+    "_": ["   ", "   ", "   ", "   ", "███"],
+    ".": [" ", " ", " ", " ", "█"],
+    " ": [" ", " ", " ", " ", " "],
+}
+
+
+def text_to_banner(text: str) -> list[str]:
+    """Произвольный текст → блочный баннер 5 строк (по ширине текста)."""
+    rows = ["", "", "", "", ""]
+    for ch in text.upper():
+        glyph = _BLOCK_FONT.get(ch, _BLOCK_FONT[" "])
+        for i in range(5):
+            rows[i] += glyph[i] + " "
+    return [r.rstrip() for r in rows]
 
 
 # ============================================================ системная инфа
@@ -2404,7 +2513,7 @@ def _parse_battery() -> tuple[int, str] | None:
     return None
 
 
-def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, str, float | None]]]]:
+def build_sections(with_speed: bool = False, with_ping: bool = False) -> list[tuple[str, list[tuple[str, str, float | None]]]]:
     """Возвращает [(заголовок, [(ключ, значение, бар%), ...]), ...]
     with_speed=True — делает спидтест (медленно, ~2-8 сек)."""
     host, os_name = get_host()
@@ -2550,6 +2659,10 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
         net_items.append(("Speed", f"↓ {mbps:.0f} Mbps ({elapsed:.1f}s)", None))
     elif with_speed:
         net_items.append(("Speed", T("unavailable"), None))
+    if with_ping:
+        p = get_ping()
+        if p:
+            net_items.append(("Ping", p, None))
     if net_items:
         sections.append(("◈ Network", net_items))
 
@@ -2587,7 +2700,80 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
     return sections
 
 
-# ============================================================ общий рендер инфо
+# ============================================================ машинный вывод
+
+def build_json(with_speed: bool = False) -> str:
+    """JSON со всей системной информацией — для скриптов и виджетов."""
+    import json as _json
+    sections = build_sections(with_speed=with_speed)
+    out = {
+        "tool": "flamfetch",
+        "version": VERSION,
+        "lang": CURRENT_LANG,
+        "os": platform.system(),
+        "arch": get_arch(),
+        "distro_icon": get_distro_icon(),
+        "theme": {
+            "name": theme_name(),
+            "mode": _THEME_CACHE.get("mode", "?"),
+        },
+        "sections": {},
+    }
+    for title, items in sections:
+        sec = {}
+        for key, value, pct in items:
+            entry = {"value": value, "pct": pct}
+            if isinstance(value, list):     # палитра
+                entry["colors"] = [_hex256(c) for c in value]
+            sec[key] = entry
+        out["sections"][title.replace("◈ ", "").strip()] = sec
+    # палитра темы отдельным полем
+    pal = palette_for_sections(_MAX_SECTIONS)
+    out["theme"]["palette"] = [_hex256(c) for c in pal]
+    return _json.dumps(out, ensure_ascii=False, indent=2)
+
+
+def _hex256(code: int) -> str:
+    """256-цветной код → #rrggbb (приблизительно, по кубу)."""
+    r, g, b = _rgb256(code)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def get_ping(host: str = "1.1.1.1") -> str | None:
+    """Пинг до хоста: среднее время + потеря пакетов."""
+    if IS_WINDOWS:
+        out = _run(["ping", "-n", "3", host])
+        if out:
+            import re
+            m = re.search(r"Average\s*=\s*(\d+)ms", out)
+            lost = re.search(r"\((\d+)% loss", out)
+            if m:
+                loss = ""
+                if lost and lost.group(1) != "0":
+                    loss = f" ({lost.group(1)}% loss)"
+                return f"{m.group(1)}ms{loss}"
+        return None
+    out = _run(["ping", "-c", "3", "-W", "2", host])
+    if out:
+        import re
+        m = re.search(r"rtt min/avg/max/mdev = [\d.]+/([\d.]+)/", out)
+        lost = re.search(r"(\d+)% packet loss", out)
+        if m:
+            loss = ""
+            if lost and lost.group(1) != "0":
+                loss = f" ({lost.group(1)}% loss)"
+            return f"{m.group(1)}ms{loss}"
+        m = re.search(r"= [\d.]+/([\d.]+)/", out)   # BSD/macOS
+        if m:
+            return f"{m.group(1)}ms"
+    return None
+
+
+def print_palette_hex() -> None:
+    """Палитра темы в hex — готово для копирования в конфиги."""
+    print(f"# FlamFetch palette — theme: {theme_name()}")
+    for i, c in enumerate(palette_for_sections(_MAX_SECTIONS)):
+        print(f"{_hex256(c)}")
 
 KEY_WIDTH = 12
 
@@ -2658,37 +2844,37 @@ def render_info_static(sections, indent: str = "") -> None:
 
 # ============================================================ рендер (статика)
 
-def render_static(with_speed: bool = False) -> None:
+def render_static(with_speed: bool = False, with_ping: bool = False) -> None:
     """Отрисовывает баннер + логотип + инфу, выходит."""
     art = get_art()
     banner = get_banner_art()
-    sections = build_sections(with_speed=with_speed)
+    sections = build_sections(with_speed=with_speed, with_ping=with_ping)
     user = os.environ.get("USER", "user")
     host = socket.gethostname()
     icon = get_distro_icon()
 
     art_lines = []
-    # ---- блочный баннер FLAMFETCH: огненный градиент + иконка поверх ----
-    banner_w = max(len(l) for l in banner)
-    # иконка поверх баннера — «главный» элемент: занимает центр слова
-    # FLAMFETCH, буквы под ней гасятся, сама — bold белым с огненным гало
-    icon = get_distro_icon()
-    icon_x = 37                      # центр баннера (слово FETCH)
-    icon_y = len(banner) // 2        # средняя строка баннера
-    for ri, line in enumerate(banner):
-        t = ri / max(len(banner) - 1, 1)
+    # ---- блочный баннер: огненный градиент + иконка поверх ----
+    if banner:
+        banner_w = max(len(l) for l in banner)
+        # иконка поверх баннера — «главный» элемент: центр слова,
+        # буквы под ней гаснут, сама — bold белым с огненным гало
+        icon_x = min(37, max(0, banner_w // 2 - 1))
+        icon_y = len(banner) // 2
+        for ri, line in enumerate(banner):
+            t = ri / max(len(banner) - 1, 1)
+            ct = 0.35 + 0.65 * (1.0 - t)
+            art_lines.append(fg(fire_color(ct)) + line)
+        # стираем буквы под иконкой и рисуем её
+        b_line = banner[icon_y]
+        left = b_line[:icon_x]
+        right = b_line[icon_x + 2:]
+        t = icon_y / max(len(banner) - 1, 1)
         ct = 0.35 + 0.65 * (1.0 - t)
-        art_lines.append(fg(fire_color(ct)) + line)
-    # стираем буквы под иконкой и рисуем её
-    b_line = banner[icon_y]
-    left = b_line[:icon_x]
-    right = b_line[icon_x + 2:]
-    t = icon_y / max(len(banner) - 1, 1)
-    ct = 0.35 + 0.65 * (1.0 - t)
-    art_lines[icon_y] = (fg(fire_color(ct)) + left + RESET
-                         + fg(255) + BOLD + icon + RESET
-                         + fg(fire_color(ct)) + right)
-    art_lines.append("")
+        art_lines[icon_y] = (fg(fire_color(ct)) + left + RESET
+                             + fg(255) + BOLD + icon + RESET
+                             + fg(fire_color(ct)) + right)
+        art_lines.append("")
     # ---- slant-арт: как было ----
     for ri, line in enumerate(art):
         t = ri / max(len(art) - 1, 1)
@@ -2881,17 +3067,19 @@ def _bar_cells(pct: float, width: int) -> list[tuple[str, int]]:
     return cells
 
 
-def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
+def render_animated(intro: float = 0.0, with_speed: bool = False,
+                    with_ping: bool = False) -> None:
+    global BANNER_ENABLED
     art = get_art()
     banner = get_banner_art()
     flam = art[:5]
     quency = art[7:]
     art_h = len(banner) + 1 + len(art)   # баннер + пропуск + slant-арт
-    banner_w = max(len(l) for l in banner)
-    banner_rows = list(range(2, 2 + len(banner)))
+    banner_w = max(len(l) for l in banner) if banner else 0
+    banner_rows = list(range(2, 2 + len(banner))) if banner else []
     distro_icon = get_distro_icon()
-    icon_x = 37                          # центр баннера (слово FETCH)
-    icon_y = banner_rows[len(banner) // 2]
+    icon_x = min(37, max(0, banner_w // 2 - 1)) if banner else 0
+    icon_y = banner_rows[len(banner) // 2] if banner else -1
 
     try:
         cols, rows = os.get_terminal_size()
@@ -2900,9 +3088,9 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
 
     # ротация: каждая сессия стартует со сдвигом набора анимаций
     rot = _rotation_offset()
-    sections = build_sections(with_speed=with_speed)
+    sections = build_sections(with_speed=with_speed, with_ping=with_ping)
 
-    art_w = max(max(len(l) for l in art), banner_w)
+    art_w = max((max(len(l) for l in art) if art else 0), banner_w)
     info_col = art_w + 6
     max_block_w = max(20, cols - info_col - 1)
     blocks = build_blocks(sections, rot=rot, max_width=max_block_w)
@@ -2921,9 +3109,12 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     deadline = start + intro + 0.5 if intro else None
 
     flam_rows = list(range(2 + len(banner) + 1,
-                           2 + len(banner) + 1 + len(flam)))
+                           2 + len(banner) + 1 + len(flam))) if banner \
+        else list(range(2, 2 + len(flam)))
     quency_rows = list(range(2 + len(banner) + 1 + len(flam) + 1,
-                             2 + len(banner) + 1 + len(flam) + 1 + len(quency)))
+                             2 + len(banner) + 1 + len(flam) + 1 + len(quency))) if banner \
+        else list(range(2 + len(flam) + 1,
+                        2 + len(flam) + 1 + len(quency)))
 
     # глитч-состояние: {(индекс блока, индекс строки): кадр начала}
     glitch_rows = {}
@@ -2934,11 +3125,79 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     sys.stdout.flush()
 
     try:
+        # --- неблокирующий ввод с клавиатуры (Unix; на Windows просто нет) ---
+        # Управление в --animate:
+        #   q      — выйти
+        #   пробел — пауза/продолжить
+        #   b      — вкл/выкл баннер
+        #   + / -  — быстрее / медленнее
+        #   r      — пересобрать анимации блоков (новая ротация)
+        import sys as _sys
+        _keyboard = False
+        _old_term = None
+        if not IS_WINDOWS:
+            try:
+                import termios, tty, select
+                _keyboard = True
+            except ImportError:
+                _keyboard = False
+        if _keyboard:
+            try:
+                _old_term = termios.tcgetattr(_sys.stdin.fileno())
+                tty.setcbreak(_sys.stdin.fileno())
+            except Exception:
+                _keyboard = False
+                _old_term = None
+
+        paused = False
+        speed_mul = 1.0
+
+        def _read_key():
+            if not _keyboard:
+                return None
+            try:
+                if select.select([_sys.stdin], [], [], 0)[0]:
+                    return _sys.stdin.read(1)
+            except Exception:
+                return None
+            return None
+
         while True:
             if intro and (time.monotonic() - start > intro
                           or (max_frames and frame >= max_frames)
                           or (deadline and time.monotonic() > deadline)):
                 break
+
+            # --- клавиши ---
+            k = _read_key()
+            if k == "q":
+                break
+            elif k == " ":
+                paused = not paused
+            elif k == "b":
+                BANNER_ENABLED = not BANNER_ENABLED
+                banner = get_banner_art()
+                banner_rows = list(range(2, 2 + len(banner))) if banner else []
+                icon_y = banner_rows[len(banner) // 2] if banner else -1
+                banner_w = max(len(l) for l in banner) if banner else 0
+                icon_x = min(37, max(0, banner_w // 2 - 1)) if banner else 0
+                art_w = max((max(len(l) for l in art) if art else 0), banner_w)
+                info_col = art_w + 6
+                max_block_w = max(20, cols - info_col - 1)
+                blocks = build_blocks(sections, rot=rot,
+                                      frame_base=frame, max_width=max_block_w)
+            elif k in ("+", "="):
+                speed_mul = max(0.25, speed_mul / 1.5)
+            elif k == "-":
+                speed_mul = min(4.0, speed_mul * 1.5)
+            elif k == "r":
+                rot_frame = frame
+                rot = (rot + 1) % len(ANIM_LIBRARY)
+                blocks = build_blocks(sections, rot=rot,
+                                      frame_base=frame, max_width=max_block_w)
+            if paused:
+                time.sleep(0.05)
+                continue
 
             frame += 1
             # ротация набора анимаций: каждые ROTATE_FRAMES кадров блоки
@@ -3411,7 +3670,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                 sys.stdout.flush()
             except (BrokenPipeError, BlockingIOError, OSError):
                 pass
-            time.sleep(FRAME_DELAY)
+            time.sleep(FRAME_DELAY * speed_mul)
 
     except KeyboardInterrupt:
         pass
@@ -3421,6 +3680,13 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     finally:
         sys.stdout.write("\033[?25h" + "\033[2J\033[H")
         sys.stdout.flush()
+        # возвращаем терминал в исходный режим
+        if _old_term is not None:
+            try:
+                import termios as _t
+                _t.tcsetattr(_sys.stdin.fileno(), _t.TCSADRAIN, _old_term)
+            except Exception:
+                pass
 
 
 # ============================================================ main
@@ -3440,15 +3706,30 @@ def main():
                         help="system info only, no logo")
     parser.add_argument("--speed", "-s", action="store_true",
                         help="quick speedtest (~2-8 sec)")
+    parser.add_argument("--ping", action="store_true",
+                        help="add ping to Cloudflare (1.1.1.1) to Network")
+    parser.add_argument("--banner", type=str, default=None, metavar="TEXT",
+                        help="custom banner text instead of FLAMFETCH")
+    parser.add_argument("--no-banner", action="store_true",
+                        help="hide the block banner entirely")
+    parser.add_argument("--json", action="store_true",
+                        help="machine-readable JSON output")
+    parser.add_argument("--palette-hex", action="store_true",
+                        help="print theme palette as #rrggbb hex codes")
     parser.add_argument("--lang", "-l", choices=["en", "ru"], default=None,
                         help="interface language (default: en; env FLAMFETCH_LANG)")
     parser.add_argument("--version", "-V", action="version",
-                        version="flamfetch 1.8.3")
+                        version=f"flamfetch {VERSION}")
     args = parser.parse_args()
 
-    # язык: флаг > переменная окружения > системная локаль > en
+    # --- конфиг: флаги CLI имеют приоритет над ~/.config/flamfetch/config.toml
+    cfg = get_config()
+
+    # язык: флаг > конфиг > переменная окружения > локаль > en
     if args.lang:
         CURRENT_LANG = args.lang
+    elif cfg.get("lang") in ("ru", "en"):
+        CURRENT_LANG = cfg["lang"]
     elif os.environ.get("FLAMFETCH_LANG", "").lower() in ("ru", "en"):
         CURRENT_LANG = os.environ["FLAMFETCH_LANG"].lower()
     else:
@@ -3456,17 +3737,34 @@ def main():
                or os.environ.get("LANGUAGE") or "").lower()
         if loc.startswith("ru"):
             CURRENT_LANG = "ru"
-    locale.setlocale(locale.LC_ALL, "")   # для корректного вывода на Windows
+    locale.setlocale(locale.LC_ALL, "")
+
+    # --- режимы вывода без рендера ---
+    if args.json:
+        print(build_json(with_speed=args.speed))
+        return
+    if args.palette_hex:
+        print_palette_hex()
+        return
+
+    # баннер: конфиг banner_text, если флаг не задан
+    global BANNER_TEXT, BANNER_ENABLED
+    if args.banner:
+        BANNER_TEXT = args.banner
+    elif cfg.get("banner_text"):
+        BANNER_TEXT = cfg["banner_text"]
+    if args.no_banner or cfg.get("no_banner", "").lower() == "true":
+        BANNER_ENABLED = False
 
     if args.no_logo:
-        sections = build_sections(with_speed=args.speed)
+        sections = build_sections(with_speed=args.speed, with_ping=args.ping)
         render_info_static(sections)
         return
 
     if args.animate:
-        render_animated(args.intro, with_speed=args.speed)
+        render_animated(args.intro, with_speed=args.speed, with_ping=args.ping)
     else:
-        render_static(with_speed=args.speed)
+        render_static(with_speed=args.speed, with_ping=args.ping)
 
 
 if __name__ == "__main__":

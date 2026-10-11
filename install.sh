@@ -5,10 +5,21 @@ set -euo pipefail
 
 REPO="https://github.com/LOSTFlam/FlamFetch"
 NAME="flamfetch"
-VERSION="1.7.0"
+VERSION="1.9.0"
 
 say() { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+printf '\033[1;31m'
+cat <<'BANNER'
+███████╗██╗      █████╗ ███╗   ███╗
+██╔════╝██║     ██╔══██╗████╗ ████║
+█████╗  ██║     ███████║██╔████╔██║
+██╔══╝  ██║     ██╔══██║██║╚██╔╝██║
+██║     ███████╗██║  ██║██║ ╚═╝ ██║
+╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝
+BANNER
+printf '\033[0m\033[1;90m  F l a m F e t c h\033[0m  v%s\n\n' "$VERSION"
 
 say "FlamFetch $VERSION — установка"
 

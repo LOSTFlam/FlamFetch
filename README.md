@@ -117,13 +117,42 @@ pip install pyfiglet
 
 ```bash
 flamfetch                  # обычный фетч (статичный логотип)
-flamfetch --animate        # с живой анимацией (Ctrl+C — выход)
+flamfetch --animate        # с живой анимацией
 flamfetch -a --intro 4     # проиграть 4 сек и выйти
 flamfetch --speed          # + быстрый спидтест (~2-8 сек)
+flamfetch --ping           # + пинг до 1.1.1.1
+flamfetch --banner HELLO   # свой текст в блочном баннере
+flamfetch --no-banner      # без блочного баннера (только slant-лого)
+flamfetch --json           # машинно-читаемый JSON
+flamfetch --palette-hex    # палитра темы в #rrggbb
 flamfetch --no-logo        # только системная информация
+flamfetch --lang ru        # русский интерфейс
 flamfetch --version        # версия
 flamfetch --help           # помощь
 ```
+
+### Управление в --animate (клавиатура)
+
+| Клавиша | Действие |
+|---------|----------|
+| `q` | выйти |
+| `пробел` | пауза / продолжить |
+| `b` | вкл/выкл блочный баннер |
+| `+` / `-` | быстрее / медленнее |
+| `r` | пересобрать анимации блоков (новая ротация) |
+
+### Конфиг
+
+Необязательный `~/.config/flamfetch/config.toml` (на Windows —
+`%APPDATA%\flamfetch\config.toml`), формат `ключ = значение`:
+
+```toml
+banner_text = HELLO      # текст баннера вместо FLAMFETCH
+lang = ru                # язык интерфейса
+no_banner = true         # выключить баннер
+```
+
+Флаги CLI имеют приоритет над конфигом.
 
 ### Зависимости
 
@@ -275,13 +304,42 @@ Or manually — see [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md).
 
 ```bash
 flamfetch                  # standard fetch (static logo)
-flamfetch --animate        # live animation (Ctrl+C to exit)
+flamfetch --animate        # live animation
 flamfetch -a --intro 4     # play for 4 seconds and exit
 flamfetch --speed          # add quick speedtest (~2-8 sec)
+flamfetch --ping           # add ping to 1.1.1.1
+flamfetch --banner HELLO   # custom block banner text
+flamfetch --no-banner      # hide the block banner
+flamfetch --json           # machine-readable JSON
+flamfetch --palette-hex    # theme palette as #rrggbb
 flamfetch --no-logo        # system info only
+flamfetch --lang ru        # Russian interface
 flamfetch --version        # version
 flamfetch --help           # help
 ```
+
+### Keyboard control in --animate
+
+| Key | Action |
+|-----|--------|
+| `q` | quit |
+| `space` | pause / resume |
+| `b` | toggle the block banner |
+| `+` / `-` | faster / slower |
+| `r` | rebuild block animations (new rotation) |
+
+### Config
+
+Optional `~/.config/flamfetch/config.toml` (`%APPDATA%\flamfetch\config.toml`
+on Windows), `key = value` format:
+
+```toml
+banner_text = HELLO      # banner text instead of FLAMFETCH
+lang = ru                # interface language
+no_banner = true         # disable the banner
+```
+
+CLI flags take priority over the config file.
 
 ### Dependencies
 

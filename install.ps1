@@ -12,9 +12,14 @@
 #   6. Run the fetch as a smoke test
 
 $ErrorActionPreference = "Stop"
+# UTF-8 вывод: без этого box-drawing баннер ломается в PowerShell 5.1
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
 $Repo  = "https://github.com/LOSTFlam/FlamFetch"
 $Raw   = "https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/flamfetch/flamfetch.py"
-$Ver   = "1.8.3"
+$Ver   = "1.9.0"
 $BinDir   = Join-Path $env:USERPROFILE ".local\bin"
 $ShareDir = Join-Path $env:USERPROFILE ".local\share\flamfetch"
 
@@ -24,13 +29,15 @@ function Write-Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
 function Write-Err($m)  { Write-Host "    $m" -ForegroundColor Red }
 
 Write-Host ""
-Write-Host "   ____  _                       _____   _         _       " -ForegroundColor Red
-Write-Host "  / ___|| | __ _ _ __ ___   __ _|  ___| | |_ _   _| |__    " -ForegroundColor Red
-Write-Host " | |  _ | |/ _`` | '_ `` _ \ / _`` | |_    | __| | | | '_ \   " -ForegroundColor Red
-Write-Host " | |_| || | (_| | | | | | | (_| |  _|   | |_| |_| | |_) |  " -ForegroundColor Red
-Write-Host "  \____||_|\__,_|_| |_| |_|\__,_|_|      \__|\__,_|_.__/   " -ForegroundColor Red
+Write-Host "███████╗██╗      █████╗ ███╗   ███╗" -ForegroundColor Red
+Write-Host "██╔════╝██║     ██╔══██╗████╗ ████║" -ForegroundColor Red
+Write-Host "█████╗  ██║     ███████║██╔████╔██║" -ForegroundColor Red
+Write-Host "██╔══╝  ██║     ██╔══██║██║╚██╔╝██║" -ForegroundColor Red
+Write-Host "██║     ███████╗██║  ██║██║ ╚═╝ ██║" -ForegroundColor Red
+Write-Host "╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝" -ForegroundColor Red
 Write-Host ""
-Write-Host "  FlamFetch Windows installer v$Ver" -ForegroundColor DarkRed
+Write-Host "  F l a m F e t c h" -ForegroundColor DarkRed
+Write-Host "  Windows installer v$Ver" -ForegroundColor DarkRed
 Write-Host ""
 
 # ---------- 1. package manager ----------
