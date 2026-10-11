@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.5.0
+Версия: 1.6.0
 """
 
 import argparse
@@ -32,6 +32,7 @@ import socket
 import subprocess
 import sys
 import time
+import unicodedata
 import zlib
 from pathlib import Path
 
@@ -157,55 +158,235 @@ ANIM_LIBRARY = [
 ROTATE_FRAMES = 240      # ~20 сек при 0.08с/кадр — смена набора анимаций
 
 
-# ============================================================ цветовые семейства
+# ============================================================ тема пользователя
 #
-# Каждый блок живёт в СВОЁМ цветовом семействе: Система — красные,
-# Оборудование — оранжевые, Ресурсы — синие, Сеть — циановые,
-# Тема — фиолетовые, Сборка — зелёные. Внутри блока строки идут
-# по градиенту: яркий сверху → темнее вниз, и вся палитра медленно
-# «дышит» (сдвиг на 1 шаг каждые ~7 сек) — цвета меняются со временем,
-# но остаются в своём семействе, поэтому выглядит цельно.
+# FlamFetch читает палитру активной темы (Omarchy/Aether colors.toml) и
+# строит все цвета на её основе: семейства блоков, рамки, значки. Палитра
+# «дышит» — сдвиг по оттенку внутри темы, но никогда не выходит за её
+# пределы, поэтому картинка всегда цельная.
 
-BLOCK_FAMILIES = [
-    [203, 167, 131, 95, 88, 52],        # Система — красные
-    [215, 209, 208, 202, 166, 130],     # Оборудование — оранжевые
-    [81, 75, 69, 63, 33, 27],           # Ресурсы — синие
-    [87, 81, 80, 44, 38, 37],           # Сеть — циановые
-    [183, 177, 141, 135, 129, 93],      # Тема — фиолетовые
-    [156, 120, 114, 78, 71, 65],        # Сборка — зелёные
-]
+def _theme_dir() -> Path | None:
+    """Директория активной темы Omarchy."""
+    name_file = Path.home() / ".config" / "omarchy" / "theme.name"
+    if not name_file.exists():
+        return None
+    try:
+        name = name_file.read_text().strip()
+    except Exception:
+        return None
+    if not name:
+        return None
+    d = Path.home() / ".config" / "omarchy" / "themes" / name
+    return d if d.is_dir() else None
+
+
+def _parse_toml_colors(path: Path) -> dict[str, str]:
+    """Мини-парсер colors.toml: ключ = "значение" (строки и #rrggbb)."""
+    out = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.strip().strip('"').strip("'")
+            if v.startswith("#") and len(v) >= 7:
+                try:
+                    r = int(v[1:3], 16)
+                    g = int(v[3:5], 16)
+                    b = int(v[5:7], 16)
+                    out[k.strip()] = f"#{r:02x}{g:02x}{b:02x}"
+                except ValueError:
+                    continue
+            elif k.strip() == "mode":
+                out[k.strip()] = v          # "dark"/"light" — строка
+    except Exception:
+        pass
+    return out
+
+
+def hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def rgb_to_256(r: int, g: int, b: int) -> int:
+    """Ближайший цвет палитры xterm-256 (куб 6×6×6)."""
+    # уровни куба: 0, 95, 135, 175, 215, 255
+    levels = [0, 95, 135, 175, 215, 255]
+    def nearest(v):
+        return min(range(6), key=lambda i: abs(levels[i] - v))
+    ri, gi, bi = nearest(r), nearest(g), nearest(b)
+    return 16 + 36 * ri + 6 * gi + bi
+
+
+def load_theme() -> dict:
+    """Палитра активной темы: {'name', 'mode', 'colors': {имя: 256-код}}."""
+    theme = {"name": "?", "mode": "?", "colors": {}}
+    tdir = _theme_dir()
+    if tdir is None:
+        return theme
+    theme["name"] = tdir.name
+    raw = _parse_toml_colors(tdir / "colors.toml")
+    if "mode" in raw:
+        theme["mode"] = raw["mode"]
+    for k, v in raw.items():
+        if v.startswith("#"):
+            r, g, b = hex_to_rgb(v)
+            theme["colors"][k] = rgb_to_256(r, g, b)
+    return theme
+
+
+_THEME_CACHE = load_theme()
+
+
+def theme_colors() -> dict:
+    return _THEME_CACHE["colors"]
+
+
+def theme_name() -> str:
+    return _THEME_CACHE["name"]
+
+
+def theme_family(si: int) -> list[int]:
+    """Семейство блока, построенное из цветов ТЕМЫ.
+    Каждому разделу — своя гамма темы (red→accent→cyan→...), с запасом
+    оттенков для градиента и дыхания."""
+    c = theme_colors()
+    # тема → акценты палитры; fallback на стандартные семейства
+    fams = [
+        [c.get("red", 167), c.get("bright_red", 203),
+         c.get("orange", 173), c.get("brown", 95), 88, 52],
+        [c.get("orange", 209), c.get("yellow", 215),
+         c.get("bright_yellow", 221), c.get("bright_orange", 208), 130, 94],
+        [c.get("blue", 69), c.get("bright_blue", 75),
+         c.get("accent", 69), 63, 33, 27],
+        [c.get("cyan", 80), c.get("bright_cyan", 87),
+         c.get("teal", 44), 38, 37, 30],
+        [c.get("magenta", 141), c.get("bright_magenta", 177),
+         c.get("purple", 135), 129, 93, 54],
+        [c.get("green", 77), c.get("bright_green", 120),
+         c.get("lime", 114), 71, 65, 23],
+    ]
+    return fams[si % len(fams)]
+
+
+def theme_ui(key: str, fallback: int) -> int:
+    """UI-цвет темы (foreground/muted/accent/…) с запасным значением."""
+    return theme_colors().get(key, fallback)
+
+
+# ============================================================ цвет строки
+#
+# Цвет строки: семейство блока (из темы) + градиент по позиции
+# (яркий сверху → темнее вниз) + дыхание палитры во времени.
 
 FAMILY_SHIFT_FRAMES = 90   # ~7 сек — палитра блока сдвигается на шаг
 
 
-def block_family(si: int) -> list[int]:
-    return BLOCK_FAMILIES[si % len(BLOCK_FAMILIES)]
-
-
 def family_color(si: int, row_i: int, n_rows: int, frame: int) -> int:
-    """Цвет строки: семейство блока + градиент по позиции + дыхание времени."""
-    fam = block_family(si)
+    fam = theme_family(si)
     n = len(fam)
-    pos = row_i * (n - 1) // max(n_rows - 1, 1)      # яркий сверху → тёмный вниз
-    shift = (frame // FAMILY_SHIFT_FRAMES) % n       # палитра «дышит»
+    pos = row_i * (n - 1) // max(n_rows - 1, 1)
+    shift = (frame // FAMILY_SHIFT_FRAMES) % n
     return fam[(pos + shift) % n]
+
+
+# ============================================================ значки строк
+#
+# У каждой строчки — свой значок (nerd font). Значок окрашивается в цвет
+# строки и участвует в анимациях наравне с текстом.
+
+KEY_ICONS = {
+    "OS": "",
+    "Host": "",
+    "Kernel": "",
+    "Uptime": "",
+    "Board": "",
+    "BIOS": "",
+    "Locale": "",
+    "Init": "",
+    "Arch": "",
+    "CPU": "",
+    "Governor": "",
+    "GPU": "",
+    "iGPU": "",
+    "Driver": "",
+    "CPU Temp": "",
+    "GPU Temp": "",
+    "Display": "",
+    "DE": "",
+    "Terminal": "",
+    "Shell": "",
+    "Launched": "",
+    "Memory": "",
+    "Swap": "",
+    "Disk /": "",
+    "Disk /home": "",
+    "Battery": "",
+    "Packages": "",
+    "Load": "",
+    "Processes": "",
+    "Iface": "",
+    "VPN": "",
+    "Note": "",
+    "WAN IP": "",
+    "Speed": "",
+    "GTK": "",
+    "Icons": "",
+    "Font": "",
+    "Cursor": "",
+    "OS ID": "",
+    "Version": "",
+    "Build": "",
+}
+
+
+def key_icon(key: str) -> str:
+    """Значок строки (или нейтральный, если для ключа нет своего)."""
+    return KEY_ICONS.get(key, "•")
+
+
+# ============================================================ ширина символов
+#
+# Эмодзи (⚡) и CJK занимают 2 клетки терминала, но len() считает их за 1 —
+# из-за этого рамки кривились. visible_width считает по-настоящему.
+
+def _char_width(ch: str) -> int:
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    return 1
+
+
+def visible_width(s: str) -> int:
+    return sum(_char_width(c) for c in s)
 
 
 # ============================================================ рамки блоков
 #
-# Каждый блок оборачивается в рамку из box-drawing символов (в духе
-# fastfetch, но со своим характером): заголовок сидит на верхней линии,
-# пункты — с древовидными коннекторами ├─ / └─.
+# Каждый блок оборачивается в рамку-ОКОНТОВКУ: боковые стенки не доходят
+# до верхней и нижней линий — рамка как бы «обнимает» блок, не запирая его.
+# Заголовок сидит на верхней линии, пункты — с древовидными коннекторами
+# ├─ / └─, у каждой строки свой значок.
 #
-# Стиль рамки ОДИН НА ВСЕ блоки и меняется со временем по кругу —
-# это держит картинку цельной, пока контент блоков живёт своей анимацией.
+# Цвета рамки берутся из ТЕМЫ пользователя и слегка «дышат» по оттенку,
+# не выходя за палитру темы. Стиль рамки один на все блоки и меняется
+# со временем по кругу — картинка остаётся цельной.
 
-FRAME_STYLES = ["solid", "march", "pulse", "corners", "wave", "sparkle"]
+# оконтовка: стенки короче линий на INSET клеток с каждой стороны
+FRAME_INSET = 2
 
 FRAME_TL, FRAME_TR = "╭", "╮"
 FRAME_BL, FRAME_BR = "╰", "╯"
 FRAME_H, FRAME_V = "─", "│"
 TREE_MID, TREE_END = "├─ ", "└─ "
+
+FRAME_STYLES = ["solid", "march", "pulse", "corners", "wave", "sparkle",
+                "dashes", "glow"]
 
 
 def frame_style(frame: int) -> str:
@@ -213,11 +394,35 @@ def frame_style(frame: int) -> str:
     return FRAME_STYLES[(frame // ROTATE_FRAMES) % len(FRAME_STYLES)]
 
 
+def frame_hchar(style: str, frame: int, pos: int) -> str:
+    """Символ горизонтальной линии для стиля."""
+    if style == "dashes":
+        return "─" if (pos + frame // 4) % 4 else " "
+    if style == "sparkle" and random.random() < 0.03:
+        return "✦"
+    return FRAME_H
+
+
+def frame_vchar(style: str, frame: int, pos: int) -> str:
+    """Символ вертикальной стенки для стиля."""
+    if style == "dashes":
+        return "│" if (pos + frame // 4) % 4 else " "
+    return FRAME_V
+
+
+def frame_colors(si: int, frame: int) -> tuple[int, int]:
+    """(приглушённый, яркий) цвета рамки из темы, с дыханием оттенка."""
+    fam = theme_family(si)
+    n = len(fam)
+    shift = (frame // FAMILY_SHIFT_FRAMES) % n
+    bright = fam[shift % n]
+    dim = fam[(shift + 3) % n]        # тот же тон темы, но глубже
+    return dim, bright
+
+
 def frame_cell(style: str, frame: int, kind: str, pos: int,
                fam_dim: int, fam_bright: int) -> tuple[str, int, str]:
     """Символ/цвет/атрибут клетки рамки для текущего стиля."""
-    rnd = random.random()
-
     if style == "solid":
         return kind, fam_dim, ""
 
@@ -245,9 +450,18 @@ def frame_cell(style: str, frame: int, kind: str, pos: int,
 
     if style == "sparkle":
         # редкие искры на рёбрах
-        if rnd < 0.02:
-            return "✦", 226, BOLD
+        if random.random() < 0.02:
+            return "✦", fam_bright, BOLD
         return kind, shade_color(fam_dim, 0.85), ""
+
+    if style == "dashes":
+        # прерывистая рамка
+        return kind, shade_color(fam_dim, 0.8), DIM
+
+    if style == "glow":
+        # мягкое дыхательное свечение всей рамки
+        f = 0.65 + 0.35 * (0.5 + 0.5 * math.sin(frame * 0.05 + pos * 0.2))
+        return kind, shade_color(fam_bright, f), ""
 
     return kind, fam_dim, ""
 
@@ -764,6 +978,24 @@ def get_theme() -> dict[str, str]:
     return theme
 
 
+def get_theme_palette() -> list[int] | None:
+    """Образец палитры активной темы: список 256-кодов ключевых акцентов."""
+    c = theme_colors()
+    if not c:
+        return None
+    out = []
+    for key in ("red", "orange", "yellow", "green", "cyan",
+                "blue", "magenta", "accent"):
+        if key in c:
+            out.append(c[key])
+    return out or None
+
+
+def is_palette_value(value) -> bool:
+    """Значение-палитра (список цветов) рисуется квадратиками, не текстом."""
+    return isinstance(value, list)
+
+
 # ---------------------------------------------------------------- прогресс-бары
 
 BAR_FILLED = "━"      # ━
@@ -1135,6 +1367,11 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
 
     # ---------- ◈ Тема ----------
     theme_items = []
+    # название активной темы + режим
+    tname = theme_name()
+    if tname != "?":
+        tmode = _THEME_CACHE.get("mode", "?")
+        theme_items.append(("Theme", f"{tname} ({tmode})", None))
     if theme.get("gtk"):
         theme_items.append(("GTK", theme["gtk"], None))
     if theme.get("icons"):
@@ -1143,6 +1380,10 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
         theme_items.append(("Font", theme["font"], None))
     if theme.get("cursor"):
         theme_items.append(("Cursor", theme["cursor"], None))
+    # образец палитры темы — цветными квадратиками (спец-значение: список цветов)
+    palette = get_theme_palette()
+    if palette:
+        theme_items.append(("Palette", palette, None))
     if theme_items:
         sections.append(("◈ Тема", theme_items))
 
@@ -1163,42 +1404,56 @@ KEY_WIDTH = 12
 
 
 def _static_block_lines(blk, frame: int = 0) -> list[str]:
-    """Блок в статичном виде: рамка + дерево пунктов, семейство цветов."""
-    fam = block_family(blk.si)
-    fam_dim = fam[min(3, len(fam) - 1)]
-    fam_bright = fam[0]
+    """Блок в статичном виде: рамка-оконтовка + дерево, семейство темы."""
+    fam_dim, fam_bright = frame_colors(blk.si, frame)
     lines = []
-    # верхняя рамка с заголовком
+    # ---- верхняя линия с заголовком ----
     title = f" {blk.title} "
-    pad = blk.width - 2 - len(title)
-    lines.append(fg(fam_dim) + FRAME_TL + FRAME_H + RESET
+    inner = blk.width - 2
+    pad = max(0, inner - len(title))
+    left_pad = pad // 2
+    right_pad = pad - left_pad
+    lines.append(fg(fam_dim) + FRAME_TL + FRAME_H * left_pad + RESET
                  + fg(fam_bright) + BOLD + title + RESET
-                 + fg(fam_dim) + FRAME_H * max(0, pad) + FRAME_TR + RESET)
-    # строки
+                 + fg(fam_dim) + FRAME_H * right_pad + FRAME_TR + RESET)
+    # ---- строки ----
     n = len(blk.rows)
     for kv_i, row in enumerate(blk.rows):
         is_last = kv_i == n - 1
         conn = TREE_END if is_last else TREE_MID
         col = family_color(blk.si, kv_i, n, frame)
-        value = row.value or "-"
-        line = fg(fam_dim) + FRAME_V + " " + RESET
-        line += fg(shade_color(fam_dim, 0.8)) + conn + RESET
-        line += fg(col) + BOLD + f"{row.key:<{KEY_WIDTH}}" + RESET
-        line += fg(COLOR_DIM) + " " + RESET
-        line += fg(COLOR_VALUE) + value
-        if row.pct is not None:
-            if row.bar_kind == "uptime":
-                line += " " + uptime_bar(row.pct / 100 * 7 * 86400)
-            else:
-                line += " " + bar(row.pct)
-        # добиваем до правой стенки
-        import re as _re
-        vis = len(_re.sub(r"\033\[[0-9;]*m", "", line))
-        if vis < blk.width:
-            line += " " * (blk.width - vis)
-        line += fg(fam_dim) + FRAME_V + RESET
-        lines.append(line)
-    # нижняя рамка
+        icon = key_icon(row.key)
+        # палитра темы — особая строчка с цветными квадратиками
+        if is_palette_value(row.value):
+            swatches = " ".join(fg(c) + "██" + RESET for c in row.value)
+            body = f"{icon} {conn}{row.key:<{KEY_WIDTH}} {swatches}"
+            body_vis = visible_width(icon) + 1 + len(conn) + KEY_WIDTH + 1 \
+                + 2 * len(row.value) + max(0, len(row.value) - 1)
+        else:
+            value = row.value or "-"
+            body = f"{icon} {conn}{row.key:<{KEY_WIDTH}} {value}"
+            if row.pct is not None:
+                if row.bar_kind == "uptime":
+                    body += " " + uptime_bar(row.pct / 100 * 7 * 86400)
+                else:
+                    body += " " + bar(row.pct)
+            body_vis = visible_width(icon) + 1 + len(conn) + KEY_WIDTH + 1 \
+                + visible_width(str(value)) \
+                + (11 if row.pct is not None else 0)
+        # стенки-оконтовка: первая и последняя строки блока — без стенок,
+        # рамка «обнимает» блок, а не запирает его
+        if kv_i == 0 or is_last:
+            left = fg(fam_dim) + " " + RESET
+        else:
+            left = fg(fam_dim) + FRAME_V + " " + RESET
+        if kv_i == 0 or is_last:
+            right = fg(fam_dim) + " " + RESET
+        else:
+            right = fg(fam_dim) + " " + FRAME_V + RESET
+        vis = blk.width - 2 - body_vis
+        fill = " " * max(0, vis)
+        lines.append(left + fg(col) + BOLD + body + RESET + fill + right)
+    # ---- нижняя линия ----
     lines.append(fg(fam_dim) + FRAME_BL + FRAME_H * (blk.width - 2)
                  + FRAME_BR + RESET)
     return lines
@@ -1354,8 +1609,9 @@ class Block:
 
 
 def _row_content_width(key: str, value: str, pct: float | None) -> int:
-    """Ширина строки внутри рамки: коннектор + ключ + значение + бар."""
-    w = len(TREE_MID) + KEY_WIDTH + 1 + len(str(value))
+    """Ширина строки внутри рамки: значок + коннектор + ключ + значение + бар.
+    Ключ выравнивается по колонке KEY_WIDTH — считаем по ней, не по факту."""
+    w = visible_width(key_icon(key)) + 1 + len(TREE_MID) + KEY_WIDTH + 1 + visible_width(str(value))
     if pct is not None:
         w += 1 + 10 + 1              # пробел + бар (10) + запас
     return w
@@ -1638,9 +1894,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
 
             for blk in blocks:
                 si = blk.si
-                fam = block_family(si)
-                fam_dim = fam[min(3, len(fam) - 1)]      # приглушённый тон семейства
-                fam_bright = fam[0]                      # яркий тон семейства
+                fam_dim, fam_bright = frame_colors(si, frame)
                 fx = info_col                            # левый край рамки
                 fy = blk.y_top
                 fw = blk.width
@@ -1651,7 +1905,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     continue
                 frame_prog = (frame - blk.first_start + 1) * 5
 
-                # ---- верхняя рамка: ╭─ заголовок ───╮ ----
+                # ---- верхняя линия: ╭── заголовок ──╮ ----
                 top_y = fy
                 if top_y < rows:
                     for i in range(fw):
@@ -1678,12 +1932,13 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                         x = fx + 2 + i
                         if x >= cols:
                             break
-                        t = (i / max(len(title) - 1, 1) + frame * 0.04) % 1.0
+                        # заголовок плавится в тон теме, но ярче стенок
                         canvas[top_y][x] = title[i]
                         ccolor[top_y][x] = fam_bright
                         cattr[top_y][x] = BOLD
 
-                # ---- строки: │ ├─ ключ │ значение │ ----
+                # ---- строки: значок + коннектор + ключ + значение ----
+                n_rows = len(blk.rows)
                 for kv_i, row in enumerate(blk.rows):
                     y = fy + 1 + kv_i
                     if y >= rows:
@@ -1695,13 +1950,11 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     scanned = abs(y - scan_y) < 1.3
                     glitched = glitch_rows.get((si, kv_i), 0) and \
                         frame - glitch_rows[(si, kv_i)] < 3
+                    is_last = kv_i == n_rows - 1
 
-                    # цвет строки: семейство блока + градиент + дыхание
-                    base = family_color(si, row.row_i, len(blk.rows), frame)
-                    fam_list = block_family(si)
-                    # лёгкий сдвиг тона внутри семейства по строке
-                    base = fam_list[min(len(fam_list) - 1,
-                                        fam_list.index(base) if base in fam_list else 0)]
+                    # цвет строки: семейство блока (из темы) + градиент
+                    base = family_color(si, row.row_i, n_rows, frame)
+                    fam_list = theme_family(si)
                     fresh = frame - st < 5
                     key_base = 255 if fresh else base
                     anim = row.anim
@@ -1709,21 +1962,58 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     shade = row.shade
 
                     # коннектор дерева: ├─ или └─ на последней строке
-                    is_last = kv_i == len(blk.rows) - 1
                     conn = TREE_END if is_last else TREE_MID
-                    # цвет коннектора — приглушённый тон семейства
-                    conn_col = shade_color(fam_dim, 0.8)
+                    icon = key_icon(row.key)
 
-                    # боковые стенки рамки
-                    if fx < cols:
-                        canvas[y][fx] = FRAME_V
-                        ccolor[y][fx] = fam_dim
-                    rx = fx + fw - 1
-                    if rx < cols:
-                        canvas[y][rx] = FRAME_V
-                        ccolor[y][rx] = fam_dim
+                    # стенки-оконтовка: первая и последняя строки — без стенок
+                    if kv_i == 0 or is_last:
+                        pass   # рамка «обнимает» блок, не запирая
+                    else:
+                        if fx < cols:
+                            canvas[y][fx] = frame_vchar(fstyle, frame, y)
+                            ccolor[y][fx] = shade_color(fam_dim, 0.9)
+                        rx = fx + fw - 1
+                        if rx < cols:
+                            canvas[y][rx] = frame_vchar(fstyle, frame, y)
+                            ccolor[y][rx] = shade_color(fam_dim, 0.9)
 
-                    seq = [(conn, conn_col, "", "conn"),
+                    # ---- палитра темы: цветные квадратики вместо текста ----
+                    if is_palette_value(row.value):
+                        # префикс: значок + коннектор + ключ — как у обычной строки
+                        prefix = f"{icon} {conn}{row.key.ljust(KEY_WIDTH)} "
+                        pos = 0
+                        for j, ch in enumerate(prefix):
+                            gp = pos + j
+                            if gp >= prog:
+                                break
+                            x = fx + 1 + gp
+                            if x >= cols:
+                                break
+                            if ch != " ":
+                                canvas[y][x] = ch
+                                if j < visible_width(icon):
+                                    ccolor[y][x] = base
+                                elif j < visible_width(icon) + 1 + len(conn):
+                                    ccolor[y][x] = shade_color(fam_dim, 0.8)
+                                else:
+                                    ccolor[y][x] = key_base
+                        pos = len(prefix)
+                        # образцы палитры: по 2 клетки на цвет, с пробелом
+                        bx = fx + 1 + pos + 1
+                        sw_prog = (frame - st + 1) * 8 - pos - 1
+                        for ci, pc in enumerate(row.value):
+                            for k in range(2):
+                                if bx >= cols or bx >= fx + fw - 1:
+                                    break
+                                if sw_prog > ci * 3 + k:
+                                    canvas[y][bx] = "█"
+                                    ccolor[y][bx] = pc
+                                bx += 1
+                            bx += 1     # пробел между образцами
+                        continue
+
+                    seq = [(icon + " ", base, "", "icon"),
+                           (conn, shade_color(fam_dim, 0.8), "", "conn"),
                            (row.key.ljust(KEY_WIDTH), key_base,
                             BOLD if math.sin(frame * 0.12 + phase) > -0.3 else "",
                             "key"),
@@ -1738,7 +2028,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                             x = fx + 1 + gp
                             if x >= cols:
                                 break
-                            if seg == "conn":
+                            if seg in ("icon", "conn", "gap"):
                                 c, cc, ca = ch, col, at
                             elif seg == "key":
                                 c, cc, ca = apply_anim(anim, ch, frame,
@@ -1747,8 +2037,6 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                                                        fam_list, prog)
                                 if fresh:
                                     cc = 255
-                            elif seg == "gap":
-                                c, cc, ca = ch, col, at
                             else:
                                 c, cc, ca = apply_anim(anim, ch, frame, phase,
                                                        gp, base, shade,
@@ -1869,7 +2157,7 @@ def main():
                         help="только системная информация, без логотипа")
     parser.add_argument("--speed", "-s", action="store_true",
                         help="сделать быстрый спидтест (добавляет ~2-8 сек)")
-    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.5.0")
+    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.6.0")
     args = parser.parse_args()
 
     if args.no_logo:
