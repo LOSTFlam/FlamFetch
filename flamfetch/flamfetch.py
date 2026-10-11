@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.8.1
+Версия: 1.8.2
 """
 
 import argparse
@@ -215,6 +215,9 @@ def palette_index(color: int) -> int:
 # Работает с кубом 16-231 и серым 232-255.
 
 _CUBE = [0, 95, 135, 175, 215, 255]
+
+# маркер второй клетки широкого символа (эмодзи): при выводе пропускается
+SKIP = "\x00"
 
 
 def _scale_cube(v: int, factor: float) -> int:
@@ -3188,8 +3191,11 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                            (row.value, COLOR_VALUE, "", "value")]
                     pos = 0
                     for text, col, at, seg in seq:
-                        for j, ch in enumerate(text):
-                            gp = pos + j
+                        j = 0
+                        while j < len(text):
+                            ch = text[j]
+                            cw = _char_width(ch)
+                            gp = pos
                             if gp >= prog:
                                 break
                             x = fx + 1 + gp
@@ -3218,7 +3224,14 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                                 ccolor[y][x] = cc
                                 if ca or at:
                                     cattr[y][x] = ca or at
-                        pos += len(text)
+                                # широкий символ (эмодзи) занимает 2 клетки:
+                                # вторая помечена маркером пропуска — при
+                                # выводе ничего не рисуется, курсор стоит
+                                # на месте (стенка не раздвигается)
+                                if cw == 2 and x + 1 < cols:
+                                    canvas[y][x + 1] = SKIP
+                            j += 1
+                            pos += cw
 
                     # курсор печатающей машинки
                     if prog < pos and anim == "typewriter":
@@ -3271,6 +3284,8 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                 prev_attr = ""
                 for x in range(cols):
                     c = canvas[y][x]
+                    if c == SKIP:
+                        continue          # вторая клетка эмодзи — пропуск
                     col = ccolor[y][x]
                     attr = cattr[y][x]
                     if c == " " and col == 0 and glow[y][x] > 0.3:
@@ -3328,7 +3343,7 @@ def main():
     parser.add_argument("--lang", "-l", choices=["en", "ru"], default=None,
                         help="interface language (default: en; env FLAMFETCH_LANG)")
     parser.add_argument("--version", "-V", action="version",
-                        version="flamfetch 1.8.1")
+                        version="flamfetch 1.8.2")
     args = parser.parse_args()
 
     # язык: флаг > переменная окружения > системная локаль > en

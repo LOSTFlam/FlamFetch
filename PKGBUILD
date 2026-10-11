@@ -1,7 +1,7 @@
 # Maintainer: lostflam <LOSTFlam@users.noreply.github.com>
 
 pkgname=flamfetch
-pkgver=1.8.1
+pkgver=1.8.2
 pkgrel=1
 pkgdesc="Fiery animated system fetch with live flame and glitch effects"
 arch=('any')
