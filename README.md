@@ -53,7 +53,7 @@ Animated system fetch with live flame and glitch effects.
 # Через репозиторий GitHub (pacman)
 # Добавь в /etc/pacman.conf:
 #   [flamfetch]
-#   Server = https://lostflam.github.io/FlamFetch/$arch
+#   Server = https://lostflam.github.io/FlamFetch/repo/$arch
 sudo pacman -Sy flamfetch
 
 # AUR (пока недоступен — регистрация закрыта)
@@ -106,7 +106,7 @@ digital glitches.
 # Via GitHub repo (pacman)
 # Add to /etc/pacman.conf:
 #   [flamfetch]
-#   Server = https://lostflam.github.io/FlamFetch/$arch
+#   Server = https://lostflam.github.io/FlamFetch/repo/$arch
 sudo pacman -Sy flamfetch
 
 # Manual
