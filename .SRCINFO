@@ -1,7 +1,7 @@
 pkgbase = flamfetch
 
 	pkgdesc = Fiery animated system fetch with live flame and glitch effects
-	pkgver = 1.7.0
+	pkgver = 1.8.0
 	pkgrel = 1
 	url = https://github.com/LOSTFlam/FlamFetch
 	arch = any
@@ -12,7 +12,7 @@ pkgbase = flamfetch
 	optdepends = gsettings: GTK theme detection
 	optdepends = nvidia-utils: GPU driver/temperature
 	optdepends = lm_sensors: CPU temperature
-	source = flamfetch-1.5.0.tar.gz::https://github.com/LOSTFlam/FlamFetch/archive/v1.7.0.tar.gz
+	source = flamfetch-1.5.0.tar.gz::https://github.com/LOSTFlam/FlamFetch/archive/v1.8.0.tar.gz
 	sha256sums = SKIP
 
 pkgname = flamfetch

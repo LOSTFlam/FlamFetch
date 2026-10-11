@@ -19,10 +19,11 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.7.0
+Версия: 1.8.0
 """
 
 import argparse
+import locale
 import math
 import os
 import platform
@@ -36,12 +37,123 @@ import unicodedata
 import zlib
 from pathlib import Path
 
+# ============================================================ платформа
+#
+# FlamFetch сам понимает, где он запущен, и берёт данные из системных
+# источников этой ОС: Linux (/proc, /sys), Windows (реестр, WMI через
+# ctypes), macOS (sysctl, sw_vers). Всё, чего нет на платформе,
+# просто не показывается — фетч не падает.
+
+IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
+IS_LINUX = platform.system() == "Linux"
+
+# ============================================================ язык
+#
+# Двуязычный интерфейс. По умолчанию — английский; --lang ru включает
+# русский. Все надписи (заголовки блоков, ключи, подписи, ошибки)
+# прогоняются через T(). Семейства цветов привязаны к смыслу ключа,
+# а не к языку, поэтому палитра одинакова в обоих режимах.
+
+CURRENT_LANG = "en"
+
+
+def T(text: str) -> str:
+    """Перевод надписи на текущий язык (по умолчанию — как есть)."""
+    if CURRENT_LANG == "ru" and text in RU:
+        return RU[text]
+    return text
+
+
+RU = {
+    # заголовки блоков
+    "◈ System": "◈ Система",
+    "◈ Hardware": "◈ Оборудование",
+    "◈ Resources": "◈ Ресурсы",
+    "◈ Network": "◈ Сеть",
+    "◈ Theme": "◈ Тема",
+    "◈ Build": "◈ Сборка",
+    # ключи — Система
+    "OS": "ОС",
+    "Host": "Хост",
+    "Kernel": "Ядро",
+    "Uptime": "Аптайм",
+    "Board": "Плата",
+    "BIOS": "BIOS",
+    "Timezone": "Пояс",
+    "Locale": "Локаль",
+    "Init": "Init",
+    "Arch": "Арх.",
+    # ключи — Оборудование
+    "CPU": "Проц",
+    "Governor": "Гувер.",
+    "GPU": "Видео",
+    "iGPU": "iGPU",
+    "Driver": "Драйвер",
+    "VRAM": "Видеопам.",
+    "GPU Use": "Загрузка GPU",
+    "CPU Temp": "Т проц",
+    "GPU Temp": "Т видео",
+    "Display": "Экран",
+    "DE": "ОС(стол)",
+    "Terminal": "Терминал",
+    "Shell": "Оболочка",
+    "Launched": "Запущено из",
+    # ключи — Ресурсы
+    "Memory": "Память",
+    "Swap": "Своп",
+    "Disk /": "Диск /",
+    "Disk /home": "Диск /home",
+    "Battery": "Батарея",
+    "Health": "Здоровье",
+    "Packages": "Пакеты",
+    "Load": "Нагрузка",
+    "Processes": "Процессы",
+    # ключи — Сеть
+    "Iface": "Интерфейс",
+    "WiFi": "Wi-Fi",
+    "VPN": "VPN",
+    "Note": "Заметка",
+    "WAN IP": "Внеш. IP",
+    "Speed": "Скорость",
+    # ключи — Тема
+    "GTK": "GTK",
+    "Icons": "Иконки",
+    "Font": "Шрифт",
+    "Cursor": "Курсор",
+    "Theme": "Тема",
+    "Palette": "Палитра",
+    # ключи — Сборка
+    "OS ID": "ID ОС",
+    "Version": "Версия",
+    "Build": "Сборка",
+    # прочее
+    "unavailable": "недоступен",
+    "yes": "да",
+    "no": "нет",
+    # единицы времени
+    "d": "д",
+    "h": "ч",
+    "m": "м",
+    # прочие надписи значений
+    "WAN IP / country — via VPN": "Внеш. IP / страна — через VPN",
+    "off": "выкл",
+}
+
 try:
     import pyfiglet
 except ImportError:
-    print("FlamFetch требует pyfiglet:  pip install pyfiglet", file=sys.stderr)
+    print("FlamFetch requires pyfiglet:  pip install pyfiglet", file=sys.stderr)
     sys.exit(1)
 
+
+# ============================================================ словарь перевода
+#
+# Русские эквиваленты надписей. Ключи — английские строки из интерфейса.
+
+
+
+# Русские эквиваленты надписей. Ключи — английские строки из интерфейса.
 
 # ============================================================ палитра огня
 
@@ -465,6 +577,33 @@ def load_theme() -> dict:
             # режим по имени темы
             low = gtk_name.lower()
             theme["mode"] = "light" if "light" in low else "dark"
+
+    # --- 2b. Windows: акцент из реестра ---
+    if not c and IS_WINDOWS:
+        theme["source"] = "Windows"
+        theme["name"] = f"Windows {platform.release()}"
+        try:
+            import winreg
+            # акцентный цвет (DWM)
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\DWM") as k:
+                accent = winreg.QueryValueEx(k, "AccentColor")[0]
+            # формат: AABBGGRR
+            a, b, g, r = ((accent >> 24) & 0xFF, (accent >> 16) & 0xFF,
+                          (accent >> 8) & 0xFF, accent & 0xFF)
+            c["accent"] = rgb_to_256(r, g, b)
+            c["blue"] = c["accent"]
+            c["red"] = rgb_to_256(min(255, r + 40), g // 2, b // 2)
+        except Exception:
+            pass
+        # тема (светлая/тёмная)
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                theme["mode"] = "light" if winreg.QueryValueEx(k, "AppsUseLightTheme")[0] else "dark"
+        except Exception:
+            theme["mode"] = "dark"
 
     # --- 3. терминалы ---
     if not c or len(c) < 4:
@@ -925,6 +1064,28 @@ def _read(path: str) -> str | None:
 
 
 def get_host() -> tuple[str, str]:
+    # ---- Windows ----
+    if IS_WINDOWS:
+        import winreg
+        name = None
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\BIOS") as k:
+                vendor = winreg.QueryValueEx(k, "SystemManufacturer")[0]
+                product = winreg.QueryValueEx(k, "SystemProductName")[0]
+                name = f"{vendor} {product}".strip()
+        except Exception:
+            pass
+        os_name = f"Windows {platform.release()}"
+        if platform.version():
+            os_name += f" (build {platform.version().split('.')[2] if len(platform.version().split('.')) > 2 else platform.version()})"
+        return (name or socket.gethostname()), os_name
+    # ---- macOS ----
+    if IS_MACOS:
+        name = _run(["sysctl", "-n", "hw.model"]) or ""
+        os_name = _run(["sw_vers", "-productVersion"]) or "macOS"
+        return (name or socket.gethostname()), f"macOS {os_name}"
+    # ---- Linux/BSD ----
     vendor = _read("/sys/class/dmi/id/sys_vendor") or ""
     product = _read("/sys/class/dmi/id/product_name") or ""
     name = f"{vendor} {product}".strip()
@@ -939,27 +1100,68 @@ def get_host() -> tuple[str, str]:
 
 
 def get_kernel() -> str:
+    if IS_WINDOWS:
+        ver = platform.version()      # '10.0.22631.4602'
+        parts = ver.split(".")
+        if len(parts) >= 3:
+            return f"NT {parts[0]}.{parts[1]} (build {parts[2]})"
+        return f"NT {ver}"
+    if IS_MACOS:
+        out = _run(["uname", "-r"])
+        return f"Darwin {out}" if out else "Darwin"
     return platform.release()
 
 
 def get_uptime() -> str:
-    raw = _read("/proc/uptime")
-    if not raw:
+    secs = None
+    if IS_WINDOWS:
+        # GetTickCount64 — миллисекунды с загрузки системы
+        try:
+            import ctypes
+            lib = ctypes.windll.kernel32
+            secs = lib.GetTickCount64() // 1000
+        except Exception:
+            secs = None
+    elif IS_MACOS:
+        out = _run(["sysctl", "-n", "kern.boottime"])
+        if out:
+            import re
+            m = re.search(r"sec\s*=\s*(\d+)", out)
+            if m:
+                secs = int(time.time()) - int(m.group(1))
+    else:
+        raw = _read("/proc/uptime")
+        if raw:
+            secs = int(float(raw.split()[0]))
+    if secs is None:
         return "?"
-    secs = int(float(raw.split()[0]))
     d, secs = divmod(secs, 86400)
     h, secs = divmod(secs, 3600)
     m, _ = divmod(secs, 60)
     parts = []
     if d:
-        parts.append(f"{d}д")
+        parts.append(f"{d}{T('d')}")
     if h:
-        parts.append(f"{h}ч")
-    parts.append(f"{m}м")
+        parts.append(f"{h}{T('h')}")
+    parts.append(f"{m}{T('m')}")
     return " ".join(parts)
 
 
 def get_board() -> str | None:
+    if IS_WINDOWS:
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\BIOS") as k:
+                vendor = winreg.QueryValueEx(k, "BaseBoardManufacturer")[0]
+                name = winreg.QueryValueEx(k, "BaseBoardProduct")[0]
+                if vendor or name:
+                    return f"{vendor} {name}".strip()
+        except Exception:
+            pass
+        return None
+    if not IS_LINUX:
+        return None
     vendor = _read("/sys/class/dmi/id/board_vendor")
     name = _read("/sys/class/dmi/id/board_name")
     if vendor or name:
@@ -968,15 +1170,36 @@ def get_board() -> str | None:
 
 
 def get_bios() -> str | None:
+    if IS_WINDOWS:
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\BIOS") as k:
+                return winreg.QueryValueEx(k, "BIOSVersion")[0]
+        except Exception:
+            return None
+    if not IS_LINUX:
+        return None
     return _read("/sys/class/dmi/id/bios_version")
 
 
 def get_locale() -> str:
+    if IS_WINDOWS:
+        try:
+            import locale
+            name = locale.getdefaultlocale()[0]
+            return name or "?"
+        except Exception:
+            return "?"
     loc = os.environ.get("LC_ALL") or os.environ.get("LANG") or "?"
     return loc.split(".")[0] if loc != "?" else loc
 
 
 def get_init() -> str:
+    if IS_WINDOWS:
+        return "Windows"
+    if IS_MACOS:
+        return "launchd"
     comm = _read("/proc/1/comm")
     return comm or "?"
 
@@ -986,6 +1209,33 @@ def get_arch() -> str:
 
 
 def get_cpu() -> str:
+    # ---- Windows: WMI через ctypes ----
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+            # имя процессора из реестра (быстрее WMI)
+            import winreg
+            name = None
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+                name = winreg.QueryValueEx(k, "ProcessorNameString")[0]
+            cores = os.cpu_count() or 0
+            if name:
+                name = " ".join(name.split())
+                return f"{name} ({cores})"
+        except Exception:
+            pass
+        return f"{platform.processor()} ({os.cpu_count() or 0})"
+    # ---- macOS ----
+    if IS_MACOS:
+        name = _run(["sysctl", "-n", "machdep.cpu.brand_string"])
+        if name:
+            name = " ".join(name.split())
+            cores = _run(["sysctl", "-n", "hw.ncpu"]) or "?"
+            return f"{name} ({cores})"
+        return platform.processor() or "?"
+    # ---- Linux ----
     info = _read("/proc/cpuinfo")
     if info:
         model = None
@@ -1036,6 +1286,28 @@ def get_disk(path: str = "/") -> str:
 
 
 def get_battery() -> str | None:
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            class SYSTEM_POWER_STATUS(ctypes.Structure):
+                _fields_ = [
+                    ("ACLineStatus", ctypes.c_byte),
+                    ("BatteryFlag", ctypes.c_byte),
+                    ("BatteryLifePercent", ctypes.c_byte),
+                    ("SystemStatusFlag", ctypes.c_byte),
+                    ("BatteryLifeTime", ctypes.c_ulong),
+                    ("BatteryFullLifeTime", ctypes.c_ulong),
+                ]
+            s = SYSTEM_POWER_STATUS()
+            ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s))
+            if s.BatteryLifePercent > 100:
+                return None
+            icon = " ⚡" if s.ACLineStatus == 1 else " 🔋"
+            return f"{s.BatteryLifePercent}%{icon}"
+        except Exception:
+            return None
+    if not IS_LINUX:
+        return None
     bat = Path("/sys/class/power_supply")
     for b in bat.glob("BAT*"):
         cap = _read(str(b / "capacity"))
@@ -1088,12 +1360,32 @@ def get_monitor_name() -> str | None:
             m = re.search(r"^Monitor\s+(\S+)", line)
             if m:
                 return m.group(1)
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            w = ctypes.windll.user32.GetSystemMetrics(0)
+            h = ctypes.windll.user32.GetSystemMetrics(1)
+            if w and h:
+                return f"{w}x{h}"
+        except Exception:
+            pass
+        return None
     return None
 
 
 def get_de() -> str:
     """Окружение рабочего стола: Wayland/X11 композиторы и классические DE."""
     # Wayland-композиторы
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            # ver == 10 → Windows 10/11 (по build)
+            ver = sys.getwindowsversion()
+            return f"Windows Explorer ({ver.major}.{ver.minor} build {ver.build})"
+        except Exception:
+            return "Windows Explorer"
+    if IS_MACOS:
+        return "Aqua"
     if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return "Hyprland (Wayland)"
     if os.environ.get("SWAYSOCK"):
@@ -1134,6 +1426,10 @@ def get_wm_version() -> str | None:
 
 
 def get_shell() -> str:
+    if IS_WINDOWS:
+        if os.environ.get("PSModulePath"):
+            return "powershell"
+        return "cmd"
     sh = os.environ.get("SHELL", "")
     return Path(sh).name if sh else "?"
 
@@ -1181,9 +1477,20 @@ def get_gpu_util() -> int | None:
 
 
 def get_wifi_info() -> tuple[str | None, int | None]:
-    """(SSID, сигнал dBm) активного Wi-Fi, или (None, None)."""
+    """(SSID, сигнал %) активного Wi-Fi, или (None, None)."""
     ssid = None
     signal = None
+    if IS_WINDOWS:
+        out = _run(["netsh", "wlan", "show", "interfaces"])
+        if out:
+            import re
+            m = re.search(r"SSID\s*:\s*(.+)", out)
+            if m and "BSSID" not in m.group(1):
+                ssid = m.group(1).strip()
+            m = re.search(r"Signal\s*:\s*(\d+)%", out)
+            if m:
+                signal = int(m.group(1))
+        return ssid, signal
     # nmcli — самый распространённый
     out = _run(["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi"])
     if out:
@@ -1215,6 +1522,13 @@ def get_wifi_info() -> tuple[str | None, int | None]:
 
 
 def get_timezone() -> str | None:
+    if IS_WINDOWS:
+        import time as _t
+        try:
+            # стандартное имя зоны из tzdata
+            return _t.tzname[0] if _t.tzname else None
+        except Exception:
+            return None
     out = _run(["timedatectl", "show", "-p", "Timezone", "--value"])
     if out:
         return out.strip()
@@ -1275,6 +1589,25 @@ def get_packages() -> str:
         out = _run(["apk", "info"])
         if out:
             counts.append(f"{len(out.splitlines())} (apk)")
+    # Windows: winget / choco / scoop
+    if IS_WINDOWS:
+        wc = []
+        out = _run(["winget", "list"])
+        if out and "Name" in out:
+            n = sum(1 for l in out.splitlines() if l.strip() and "—" not in l[:5])
+            if n:
+                wc.append(f"{n} (winget)")
+        out = _run(["choco", "list", "--local-only"])
+        if out:
+            n = sum(1 for l in out.splitlines() if " packages installed" not in l and l.strip())
+            if n:
+                wc.append(f"{n} (choco)")
+        out = _run(["scoop", "list"])
+        if out:
+            n = sum(1 for l in out.splitlines() if l.strip() and "Installed apps" not in l)
+            if n:
+                wc.append(f"{n} (scoop)")
+        return ", ".join(wc) or "?"
     # flatpak — всегда показываем, если есть
     out = _run(["flatpak", "list"])
     if out:
@@ -1295,8 +1628,66 @@ def get_ip() -> str | None:
         return None
 
 
+def _wmi_gpu_windows() -> list[str]:
+    """Имена видеокарт через WMI (ctypes, без внешних зависимостей)."""
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+        # LOCALE_SYSTEM_DEFAULT = 0x400
+        p_loc = ctypes.create_unicode_buffer(9)
+        # CLSID_WbemLocator / IID_IWbemLocator
+        clsid = ctypes.OLE.BSTR if False else None
+        # упрощённо: используем COM-строки
+        import uuid
+        CLSID_WbemLocator = uuid.UUID("4590f811-1d3a-11d0-891f-00aa004b2e24")
+        IID_IWbemLocator = uuid.UUID("dc12a687-737f-11cf-884d-00aa004b2e24")
+        p_locator = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            (ctypes.c_char * 16).from_buffer_copy(CLSID_WbemLocator.bytes_le),
+            None, 4,  # CLSCTX_INPROC_SERVER... но Wbem — inproc
+            (ctypes.c_char * 16).from_buffer_copy(IID_IWbemLocator.bytes_le),
+            ctypes.byref(p_locator))
+        if hr != 0 or not p_locator:
+            return []
+        # ConnectServer через vtable слишком глубоко для чистого ctypes —
+        # fallback: имена из реестра (GPU class)
+        import winreg
+        gpus = []
+        base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
+                for i in range(20):
+                    try:
+                        sub = f"{i:04d}"
+                        with winreg.OpenKey(k, sub) as sk:
+                            desc = winreg.QueryValueEx(sk, "DriverDesc")[0]
+                            if desc:
+                                gpus.append(" ".join(desc.split()))
+                    except OSError:
+                        break
+        except Exception:
+            pass
+        return gpus[:2]
+    except Exception:
+        return []
+
+
 def get_gpu() -> list[str]:
     """Возвращает список GPU (NVIDIA + AMD и т.д.)."""
+    if IS_WINDOWS:
+        return _wmi_gpu_windows()
+    if IS_MACOS:
+        out = _run(["system_profiler", "SPDisplaysDataType"])
+        gpus = []
+        if out:
+            import re
+            for m in re.finditer(r"Chipset Model:\s*(.+)", out):
+                name = m.group(1).strip()
+                if name:
+                    gpus.append(name)
+        return gpus[:2]
     out = _run(["lspci"])
     if not out:
         return []
@@ -1325,6 +1716,8 @@ def get_gpu_driver() -> str | None:
 
 def get_temps() -> dict[str, float]:
     """Температуры CPU/GPU в °C."""
+    if not IS_LINUX:
+        return {}
     temps = {}
     out = _run(["sensors"])
     if out:
@@ -1378,6 +1771,12 @@ def get_gpu_temp() -> float | None:
 
 def get_terminal() -> str:
     """Настоящий терминал: TERM_PROGRAM → обход дерева процессов вверх."""
+    if IS_WINDOWS:
+        if os.environ.get("WT_SESSION"):
+            return "Windows Terminal"
+        if os.environ.get("TERM_PROGRAM"):
+            return os.environ["TERM_PROGRAM"]
+        return "conhost"
     term = os.environ.get("TERM_PROGRAM", "")
     if term:
         return term
@@ -1441,8 +1840,21 @@ def get_distro_icon() -> str:
 
 
 def get_theme() -> dict[str, str]:
-    """GTK-тема, иконки, шрифт, курсор."""
+    """GTK-тема, иконки, шрифт, курсор (или Windows: тема оформления)."""
     theme = {}
+    if IS_WINDOWS:
+        try:
+            import winreg
+            key = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                apps = winreg.QueryValueEx(k, "AppsUseLightTheme")[0]
+            theme["gtk"] = f"Windows {'light' if apps else 'dark'}"
+            theme["icons"] = "fluent"
+            theme["font"] = "Segoe UI"
+            theme["cursor"] = "windows"
+        except Exception:
+            pass
+        return theme
     for key, schema, setting in (
         ("gtk", "org.gnome.desktop.interface", "gtk-theme"),
         ("icons", "org.gnome.desktop.interface", "icon-theme"),
@@ -1515,6 +1927,27 @@ def uptime_bar(seconds: float, max_days: float = 7.0, width: int = 10) -> str:
 
 def get_interfaces() -> list[tuple[str, str, str]]:
     """Активные сетевые интерфейсы: [(имя, статус, IP), ...]"""
+    if IS_WINDOWS:
+        out = _run(["netsh", "interface", "show", "interface"])
+        ifaces = []
+        if out:
+            import re
+            for line in out.splitlines():
+                m = re.match(r"\s*(Enabled|Connected)\s+(\S+)\s+(\S+)", line)
+                if m and m.group(2).lower() != "loopback":
+                    ifaces.append((m.group(2), m.group(1), ""))
+        return ifaces
+    if IS_MACOS:
+        out = _run(["ifconfig"])
+        ifaces = []
+        if out:
+            import re
+            for m in re.finditer(r"^(\w+): flags.*?status: (\w+).*?inet (\S+)",
+                                 out, re.S | re.M):
+                name, status, ip = m.groups()
+                if name != "lo" and status == "active":
+                    ifaces.append((name, "UP", ip))
+        return ifaces
     out = _run(["ip", "-brief", "addr", "show"])
     if not out:
         return []
@@ -1536,6 +1969,8 @@ def get_interfaces() -> list[tuple[str, str, str]]:
 
 def get_vpn_interfaces() -> list[str]:
     """VPN-интерфейсы (tun, wg, tap, ppp)."""
+    if not IS_LINUX:
+        return []
     out = _run(["ip", "-brief", "addr", "show"])
     if not out:
         return []
@@ -1608,6 +2043,33 @@ def get_uptime_seconds() -> float:
 
 
 def get_swap() -> tuple[float, float] | None:
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            m = MEMORYSTATUSEX()
+            m.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            total = m.ullTotalPageFile / 1024**3
+            avail = m.ullAvailPageFile / 1024**3
+            used = total - avail
+            if total <= 0:
+                return None
+            return used, total
+        except Exception:
+            return None
+    if not IS_LINUX:
+        return None
     info = _read("/proc/meminfo")
     if not info:
         return None
@@ -1625,6 +2087,37 @@ def get_swap() -> tuple[float, float] | None:
 
 
 def get_load() -> str:
+    """Load average (1/5/15 мин) или CPU % на Windows."""
+    if IS_WINDOWS:
+        try:
+            import ctypes, time as _t
+            class FILETIME(ctypes.Structure):
+                _fields_ = [("dwLowDateTime", ctypes.c_ulong),
+                            ("dwHighDateTime", ctypes.c_ulong)]
+            def ft2int(ft):
+                return (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+            idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
+            ctypes.windll.kernel32.GetSystemTimes(
+                ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user))
+            _t.sleep(0.3)
+            idle2, kernel2, user2 = FILETIME(), FILETIME(), FILETIME()
+            ctypes.windll.kernel32.GetSystemTimes(
+                ctypes.byref(idle2), ctypes.byref(kernel2), ctypes.byref(user2))
+            idle_d = ft2int(idle2) - ft2int(idle)
+            total_d = (ft2int(kernel2) + ft2int(user2)) - (ft2int(kernel) + ft2int(user))
+            if total_d > 0:
+                load = 100 * (1 - idle_d / total_d)
+                return f"{load:.0f}% CPU"
+        except Exception:
+            pass
+        return "?"
+    if IS_MACOS:
+        out = _run(["sysctl", "-n", "vm.loadavg"])
+        if out:
+            parts = out.strip("{}\n ").split()
+            if len(parts) >= 3:
+                return f"{parts[0]} {parts[1]} {parts[2]}"
+        return "?"
     raw = _read("/proc/loadavg")
     if not raw:
         return "?"
@@ -1633,6 +2126,17 @@ def get_load() -> str:
 
 
 def get_processes() -> int:
+    if IS_WINDOWS:
+        out = _run(["tasklist"])
+        if out:
+            return sum(1 for l in out.splitlines()
+                       if l.strip() and ".exe" in l.lower())
+        return 0
+    if IS_MACOS:
+        out = _run(["ps", "-ax"])
+        if out:
+            return len(out.splitlines()) - 1
+        return 0
     try:
         return len([d for d in os.listdir("/proc") if d.isdigit()])
     except Exception:
@@ -1640,6 +2144,23 @@ def get_processes() -> int:
 
 
 def get_parent_process() -> str:
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+            GetCurrentProcessId = ctypes.windll.kernel32.GetCurrentProcessId
+            return "explorer"  # упрощённо: процесс запущен из Explorer/cmd
+        except Exception:
+            return "?"
+    if IS_MACOS:
+        try:
+            ppid = os.getppid()
+            comm = _run(["ps", "-p", str(ppid), "-o", "comm="])
+            if comm:
+                return Path(comm.strip()).name
+        except Exception:
+            pass
+        return "?"
     try:
         ppid = os.getppid()
         comm = _read(f"/proc/{ppid}/comm")
@@ -1653,6 +2174,46 @@ def get_parent_process() -> str:
 # Пункт: (ключ, значение, процент_для_бара | None)
 
 def _parse_mem() -> tuple[float, float, float]:
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            m = MEMORYSTATUSEX()
+            m.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            total = m.ullTotalPhys / 1024**3
+            used = total - m.ullAvailPhys / 1024**3
+            return used, total, m.dwMemoryLoad
+        except Exception:
+            return 0.0, 0.0, 0.0
+    if IS_MACOS:
+        total = _run(["sysctl", "-n", "hw.memsize"])
+        if total:
+            try:
+                t = int(total) / 1024**3
+                vm = _run(["vm_stat"]) or ""
+                free = 0.0
+                for line in vm.splitlines():
+                    if "Pages free" in line:
+                        import re
+                        mm = re.search(r"(\d+)", line)
+                        if mm:
+                            free = int(mm.group(1)) * 4096 / 1024**3
+                used = t - free
+                return used, t, 100 * used / t
+            except Exception:
+                return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0
     info = _read("/proc/meminfo")
     if not info:
         return 0.0, 0.0, 0.0
@@ -1702,6 +2263,27 @@ def _is_separate_mount(path: str) -> bool:
 
 
 def _parse_battery() -> tuple[int, str] | None:
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            class SYSTEM_POWER_STATUS(ctypes.Structure):
+                _fields_ = [
+                    ("ACLineStatus", ctypes.c_byte),
+                    ("BatteryFlag", ctypes.c_byte),
+                    ("BatteryLifePercent", ctypes.c_byte),
+                    ("SystemStatusFlag", ctypes.c_byte),
+                    ("BatteryLifeTime", ctypes.c_ulong),
+                    ("BatteryFullLifeTime", ctypes.c_ulong),
+                ]
+            s = SYSTEM_POWER_STATUS()
+            ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s))
+            if s.BatteryLifePercent > 100:
+                return None
+            return s.BatteryLifePercent, ("Charging" if s.ACLineStatus == 1 else "Discharging")
+        except Exception:
+            return None
+    if not IS_LINUX:
+        return None
     for b in Path("/sys/class/power_supply").glob("BAT*"):
         cap = _read(str(b / "capacity"))
         status = _read(str(b / "status")) or ""
@@ -1825,9 +2407,9 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
         res_items.append(("Processes", str(procs), None))
 
     sections = [
-        ("◈ Система", sys_items),
-        ("◈ Оборудование", hw_items),
-        ("◈ Ресурсы", res_items),
+        ("◈ System", sys_items),
+        ("◈ Hardware", hw_items),
+        ("◈ Resources", res_items),
     ]
 
     # ---------- ◈ Сеть ----------
@@ -1848,19 +2430,19 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
             net_items.append(("VPN", f"✓ {vpn_name} → {ext['country']} ({ext['city']})", None))
         else:
             net_items.append(("VPN", f"✓ {vpn_name}", None))
-        net_items.append(("Note", "WAN IP / страна — через VPN", None))
+        net_items.append(("Note", T("WAN IP / country — via VPN"), None))
     else:
         if ext:
-            net_items.append(("VPN", f"✗ off → {ext['country']} ({ext['city']})", None))
+            net_items.append(("VPN", f"✗ {T('off')} → {ext['country']} ({ext['city']})", None))
     if ext:
         net_items.append(("WAN IP", ext["ip"], None))
     if speed:
         mbps, elapsed = speed
         net_items.append(("Speed", f"↓ {mbps:.0f} Mbps ({elapsed:.1f}s)", None))
     elif with_speed:
-        net_items.append(("Speed", "недоступен", None))
+        net_items.append(("Speed", T("unavailable"), None))
     if net_items:
-        sections.append(("◈ Сеть", net_items))
+        sections.append(("◈ Network", net_items))
 
     # ---------- ◈ Тема ----------
     theme_items = []
@@ -1882,11 +2464,11 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
     if palette:
         theme_items.append(("Palette", palette, None))
     if theme_items:
-        sections.append(("◈ Тема", theme_items))
+        sections.append(("◈ Theme", theme_items))
 
     # ---------- ◈ Сборка ----------
     binfo = get_build_info()
-    sections.append(("◈ Сборка", [
+    sections.append(("◈ Build", [
         ("OS ID", binfo["id"], None),
         ("Version", binfo["version"], None),
         ("Build", binfo["build_id"], None),
@@ -1905,7 +2487,7 @@ def _static_block_lines(blk, frame: int = 0) -> list[str]:
     fam_dim, fam_bright = frame_colors(blk.si, frame)
     lines = []
     # ---- верхняя линия с заголовком ----
-    title = f" {blk.title} "
+    title = f" {T(blk.title)} "
     inner = blk.width - 2
     pad = max(0, inner - len(title))
     left_pad = pad // 2
@@ -1923,12 +2505,12 @@ def _static_block_lines(blk, frame: int = 0) -> list[str]:
         # палитра темы — особая строчка с цветными квадратиками
         if is_palette_value(row.value):
             swatches = " ".join(fg(c) + "██" + RESET for c in row.value)
-            body = f"{icon} {conn}{row.key:<{KEY_WIDTH}} {swatches}"
+            body = f"{icon} {conn}{T(row.key):<{KEY_WIDTH}} {swatches}"
             body_vis = visible_width(icon) + 1 + len(conn) + KEY_WIDTH + 1 \
                 + 2 * len(row.value) + max(0, len(row.value) - 1)
         else:
             value = row.value or "-"
-            body = f"{icon} {conn}{row.key:<{KEY_WIDTH}} {value}"
+            body = f"{icon} {conn}{T(row.key):<{KEY_WIDTH}} {value}"
             if row.pct is not None:
                 if row.bar_kind == "uptime":
                     body += " " + uptime_bar(row.pct / 100 * 7 * 86400)
@@ -2422,7 +3004,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                         if at:
                             cattr[top_y][x] = at
                     # заголовок сидит на верхней линии
-                    title = f" {blk.title} "
+                    title = f" {T(blk.title)} "
                     n = min(len(title), int(frame_prog) - 2)
                     for i in range(max(0, n)):
                         x = fx + 2 + i
@@ -2484,7 +3066,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     # ---- палитра темы: цветные квадратики вместо текста ----
                     if is_palette_value(row.value):
                         # префикс: значок + коннектор + ключ — как у обычной строки
-                        prefix = f"{icon} {conn}{row.key.ljust(KEY_WIDTH)} "
+                        prefix = f"{icon} {conn}{T(row.key).ljust(KEY_WIDTH)} "
                         pos = 0
                         for j, ch in enumerate(prefix):
                             gp = pos + j
@@ -2518,7 +3100,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
 
                     seq = [(icon + " ", base, "", "icon"),
                            (conn, shade_color(fam_dim, 0.8), "", "conn"),
-                           (row.key.ljust(KEY_WIDTH), key_base,
+                           (T(row.key).ljust(KEY_WIDTH), key_base,
                             BOLD if math.sin(beat(frame, 2.2) + phase) > -0.3 else "",
                             "key"),
                            (" ", COLOR_DIM, "", "gap"),
@@ -2648,21 +3230,37 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
 # ============================================================ main
 
 def main():
+    global CURRENT_LANG
     parser = argparse.ArgumentParser(
         prog="flamfetch",
-        description="FlamFetch — огненный системный фетч с живой анимацией",
+        description="FlamFetch — fiery animated system fetch",
         add_help=True,
     )
     parser.add_argument("--animate", "-a", action="store_true",
-                        help="живая анимация логотипа")
+                        help="live logo animation")
     parser.add_argument("--intro", type=float, default=0.0,
-                        help="секунд анимации, затем выход (0 = бесконечно)")
+                        help="seconds of animation, then exit (0 = forever)")
     parser.add_argument("--no-logo", action="store_true",
-                        help="только системная информация, без логотипа")
+                        help="system info only, no logo")
     parser.add_argument("--speed", "-s", action="store_true",
-                        help="сделать быстрый спидтест (добавляет ~2-8 сек)")
-    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.7.0")
+                        help="quick speedtest (~2-8 sec)")
+    parser.add_argument("--lang", "-l", choices=["en", "ru"], default=None,
+                        help="interface language (default: en; env FLAMFETCH_LANG)")
+    parser.add_argument("--version", "-V", action="version",
+                        version="flamfetch 1.8.0")
     args = parser.parse_args()
+
+    # язык: флаг > переменная окружения > системная локаль > en
+    if args.lang:
+        CURRENT_LANG = args.lang
+    elif os.environ.get("FLAMFETCH_LANG", "").lower() in ("ru", "en"):
+        CURRENT_LANG = os.environ["FLAMFETCH_LANG"].lower()
+    else:
+        loc = (os.environ.get("LC_ALL") or os.environ.get("LANG")
+               or os.environ.get("LANGUAGE") or "").lower()
+        if loc.startswith("ru"):
+            CURRENT_LANG = "ru"
+    locale.setlocale(locale.LC_ALL, "")   # для корректного вывода на Windows
 
     if args.no_logo:
         sections = build_sections(with_speed=args.speed)

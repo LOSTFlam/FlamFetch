@@ -147,11 +147,26 @@ curl -fsSL https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.s
 sudo pacman -Sy flamfetch
 
 # Debian/Ubuntu (.deb), Fedora (.rpm) — см. INSTALL-DEBIAN.md / INSTALL-RPM.md
+# Windows (Scoop/Winget/вручную) — см. INSTALL-WINDOWS.md
 ```
 
 FlamFetch определяет пакеты через `pacman`, `dpkg`, `rpm` — и подстраивает
 цвета под тему **любой** ОС: Omarchy → GTK → конфиг терминала
-(alacritty/kitty/foot/ghostty) → Xresources → KDE → системная палитра.
+(alacritty/kitty/foot/ghostty) → Xresources → KDE → акцент Windows →
+системная палитра.
+
+### Язык интерфейса
+
+По умолчанию — **английский**. Русский включается флагом, переменной
+окружения или системной локалью:
+
+```bash
+flamfetch --lang ru           # русский интерфейс
+flamfetch --lang en           # английский (по умолчанию)
+FLAMFETCH_LANG=ru flamfetch   # через переменную окружения
+```
+
+При запуске на системе с русской локалью (LANG=ru_*) язык выберется сам.
 
 ---
 
