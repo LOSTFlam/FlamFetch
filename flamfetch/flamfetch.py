@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.4.0
+Версия: 1.5.0
 """
 
 import argparse
@@ -157,6 +157,101 @@ ANIM_LIBRARY = [
 ROTATE_FRAMES = 240      # ~20 сек при 0.08с/кадр — смена набора анимаций
 
 
+# ============================================================ цветовые семейства
+#
+# Каждый блок живёт в СВОЁМ цветовом семействе: Система — красные,
+# Оборудование — оранжевые, Ресурсы — синие, Сеть — циановые,
+# Тема — фиолетовые, Сборка — зелёные. Внутри блока строки идут
+# по градиенту: яркий сверху → темнее вниз, и вся палитра медленно
+# «дышит» (сдвиг на 1 шаг каждые ~7 сек) — цвета меняются со временем,
+# но остаются в своём семействе, поэтому выглядит цельно.
+
+BLOCK_FAMILIES = [
+    [203, 167, 131, 95, 88, 52],        # Система — красные
+    [215, 209, 208, 202, 166, 130],     # Оборудование — оранжевые
+    [81, 75, 69, 63, 33, 27],           # Ресурсы — синие
+    [87, 81, 80, 44, 38, 37],           # Сеть — циановые
+    [183, 177, 141, 135, 129, 93],      # Тема — фиолетовые
+    [156, 120, 114, 78, 71, 65],        # Сборка — зелёные
+]
+
+FAMILY_SHIFT_FRAMES = 90   # ~7 сек — палитра блока сдвигается на шаг
+
+
+def block_family(si: int) -> list[int]:
+    return BLOCK_FAMILIES[si % len(BLOCK_FAMILIES)]
+
+
+def family_color(si: int, row_i: int, n_rows: int, frame: int) -> int:
+    """Цвет строки: семейство блока + градиент по позиции + дыхание времени."""
+    fam = block_family(si)
+    n = len(fam)
+    pos = row_i * (n - 1) // max(n_rows - 1, 1)      # яркий сверху → тёмный вниз
+    shift = (frame // FAMILY_SHIFT_FRAMES) % n       # палитра «дышит»
+    return fam[(pos + shift) % n]
+
+
+# ============================================================ рамки блоков
+#
+# Каждый блок оборачивается в рамку из box-drawing символов (в духе
+# fastfetch, но со своим характером): заголовок сидит на верхней линии,
+# пункты — с древовидными коннекторами ├─ / └─.
+#
+# Стиль рамки ОДИН НА ВСЕ блоки и меняется со временем по кругу —
+# это держит картинку цельной, пока контент блоков живёт своей анимацией.
+
+FRAME_STYLES = ["solid", "march", "pulse", "corners", "wave", "sparkle"]
+
+FRAME_TL, FRAME_TR = "╭", "╮"
+FRAME_BL, FRAME_BR = "╰", "╯"
+FRAME_H, FRAME_V = "─", "│"
+TREE_MID, TREE_END = "├─ ", "└─ "
+
+
+def frame_style(frame: int) -> str:
+    """Текущий стиль рамки — общий для всех блоков, меняется по кругу."""
+    return FRAME_STYLES[(frame // ROTATE_FRAMES) % len(FRAME_STYLES)]
+
+
+def frame_cell(style: str, frame: int, kind: str, pos: int,
+               fam_dim: int, fam_bright: int) -> tuple[str, int, str]:
+    """Символ/цвет/атрибут клетки рамки для текущего стиля."""
+    rnd = random.random()
+
+    if style == "solid":
+        return kind, fam_dim, ""
+
+    if style == "march":
+        # бегущая яркость вдоль рамки
+        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.6 + frame * 0.12))
+        return kind, shade_color(fam_dim, f), ""
+
+    if style == "pulse":
+        # вся рамка дышит разом
+        f = 0.50 + 0.50 * (0.5 + 0.5 * math.sin(frame * 0.07))
+        return kind, shade_color(fam_dim, f), ""
+
+    if style == "corners":
+        # углы вспыхивают, рёбра спокойны
+        if kind in (FRAME_TL, FRAME_TR, FRAME_BL, FRAME_BR):
+            f = 0.75 + 0.25 * math.sin(frame * 0.2)
+            return kind, shade_color(fam_bright, f), BOLD
+        return kind, shade_color(fam_dim, 0.7), ""
+
+    if style == "wave":
+        # волна цвета едет по периметру
+        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.4 - frame * 0.1))
+        return kind, shade_color(fam_bright if f > 0.8 else fam_dim, f), ""
+
+    if style == "sparkle":
+        # редкие искры на рёбрах
+        if rnd < 0.02:
+            return "✦", 226, BOLD
+        return kind, shade_color(fam_dim, 0.85), ""
+
+    return kind, fam_dim, ""
+
+
 def _rotation_offset() -> int:
     """Счётчик запусков: каждая новая сессия стартует со сдвигом набора."""
     try:
@@ -175,13 +270,16 @@ def _rotation_offset() -> int:
 
 
 def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
-               base_color: int, shade: float, pal_idx: int,
+               base_color: int, shade: float, fam: list[int],
                prog: float) -> tuple[str, int, str]:
-    """Анимация одного символа пункта → (символ, цвет, attr)."""
+    """Анимация одного символа пункта → (символ, цвет, attr).
+    fam — цветовое семейство блока: cycling-эффекты ходят по нему,
+    поэтому блок сохраняет свою идентичность (красный остаётся красным)."""
     col = shade_color(base_color, shade)
     if ch == " ":
         return ch, col, ""
     rnd = random.random()
+    nf = len(fam)
 
     if anim == "glitch":
         # цифровой глитч: символы рассыпаются глитч-глифами
@@ -199,9 +297,9 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
         return ch, col, ""
 
     if anim == "wave":
-        # цветовая волна: оттенок едет по строке
-        idx = (pal_idx + gi // 4 + frame // 6) % len(ITEM_PALETTE)
-        return ch, shade_color(ITEM_PALETTE[idx], shade), ""
+        # цветовая волна по СЕМЕЙСТВУ блока: оттенок едет по строке
+        idx = (gi // 4 + frame // 6) % nf
+        return ch, shade_color(fam[idx], shade), ""
 
     if anim == "flicker":
         # мерцание: иногда гаснет, иногда вспыхивает белым
@@ -214,8 +312,8 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
     if anim == "matrix":
         # цифровой дождь: символы значения превращаются в 0/1
         if rnd < 0.035:
-            return random.choice("01░▒▓█"), random.choice([40, 46, 34, 118]), ""
-        return ch, shade_color(base_color, shade), ""
+            return random.choice("01░▒▓█"), shade_color(fam[0], 0.9), ""
+        return ch, col, ""
 
     if anim == "scanline":
         # узкая полоса бежит по строке, подсвечивая символы
@@ -227,13 +325,13 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
     if anim == "sparkle":
         # искры: случайный символ вспыхивает ✦
         if rnd < 0.012:
-            return "✦", random.choice([226, 255, 220]), ""
+            return "✦", fam[0], BOLD
         return ch, col, ""
 
     if anim == "colorcycle":
-        # цвет пункта медленно крутится по всей палитре
-        idx = (pal_idx + frame // 9) % len(ITEM_PALETTE)
-        return ch, shade_color(ITEM_PALETTE[idx], shade), ""
+        # цвет пункта медленно крутится по семейству блока
+        idx = (frame // 9) % nf
+        return ch, shade_color(fam[idx], shade), ""
 
     if anim == "breathe":
         # строка дышит яркостью
@@ -241,17 +339,18 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
         return ch, shade_color(base_color, f), ""
 
     if anim == "fire":
-        # огненный градиент по строке + искры
+        # огненный градиент по семейству блока + искры
         t = (gi / 26.0 + frame * 0.03 + phase * 0.1) % 1.0
         if rnd < 0.015:
-            return random.choice("·'`"), random.choice([208, 214, 220]), ""
-        return ch, fire_color(0.35 + 0.65 * t), ""
+            return random.choice("·'`"), fam[0], ""
+        idx = min(nf - 1, int(t * nf))
+        return ch, fam[idx], ""
 
     if anim == "drip":
-        # капли: редкие символы становятся огненными точками
+        # капли: редкие символы становятся огненными точками семейства
         if rnd < 0.02:
-            return random.choice("'·,"), random.choice([202, 208, 214]), ""
-        return ch, shade_color(base_color, shade), ""
+            return random.choice("'·,"), fam[1] if nf > 1 else fam[0], ""
+        return ch, col, ""
 
     if anim == "slide":
         # выезд слева: яркая голова на границе prog
@@ -260,9 +359,9 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
         return ch, col, ""
 
     if anim == "rainbow":
-        # радужный бегун по всей строке
-        idx = (pal_idx + gi // 2 + frame // 4) % len(ITEM_PALETTE)
-        return ch, ITEM_PALETTE[idx], BOLD if gi % 3 == 0 else ""
+        # радужный бегун по семейству блока
+        idx = (gi // 2 + frame // 4) % nf
+        return ch, fam[idx], BOLD if gi % 3 == 0 else ""
 
     return ch, col, ""
 
@@ -1063,29 +1162,54 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
 KEY_WIDTH = 12
 
 
-def _format_line(key: str, value: str, pct: float | None,
-                 bar_kind: str | None = None) -> str:
-    """Строка пункта в статичном виде: цветной ключ + значение + бар."""
-    kc = item_color(key)
-    line = fg(kc) + BOLD + f"{key:<{KEY_WIDTH}}" + RESET
-    line += fg(COLOR_DIM) + "│ " + RESET
-    line += fg(COLOR_VALUE) + (value or "-")
-    if pct is not None:
-        if bar_kind == "uptime":
-            line += " " + uptime_bar(pct / 100 * 7 * 86400)
-        else:
-            line += " " + bar(pct)
-    return line
+def _static_block_lines(blk, frame: int = 0) -> list[str]:
+    """Блок в статичном виде: рамка + дерево пунктов, семейство цветов."""
+    fam = block_family(blk.si)
+    fam_dim = fam[min(3, len(fam) - 1)]
+    fam_bright = fam[0]
+    lines = []
+    # верхняя рамка с заголовком
+    title = f" {blk.title} "
+    pad = blk.width - 2 - len(title)
+    lines.append(fg(fam_dim) + FRAME_TL + FRAME_H + RESET
+                 + fg(fam_bright) + BOLD + title + RESET
+                 + fg(fam_dim) + FRAME_H * max(0, pad) + FRAME_TR + RESET)
+    # строки
+    n = len(blk.rows)
+    for kv_i, row in enumerate(blk.rows):
+        is_last = kv_i == n - 1
+        conn = TREE_END if is_last else TREE_MID
+        col = family_color(blk.si, kv_i, n, frame)
+        value = row.value or "-"
+        line = fg(fam_dim) + FRAME_V + " " + RESET
+        line += fg(shade_color(fam_dim, 0.8)) + conn + RESET
+        line += fg(col) + BOLD + f"{row.key:<{KEY_WIDTH}}" + RESET
+        line += fg(COLOR_DIM) + " " + RESET
+        line += fg(COLOR_VALUE) + value
+        if row.pct is not None:
+            if row.bar_kind == "uptime":
+                line += " " + uptime_bar(row.pct / 100 * 7 * 86400)
+            else:
+                line += " " + bar(row.pct)
+        # добиваем до правой стенки
+        import re as _re
+        vis = len(_re.sub(r"\033\[[0-9;]*m", "", line))
+        if vis < blk.width:
+            line += " " * (blk.width - vis)
+        line += fg(fam_dim) + FRAME_V + RESET
+        lines.append(line)
+    # нижняя рамка
+    lines.append(fg(fam_dim) + FRAME_BL + FRAME_H * (blk.width - 2)
+                 + FRAME_BR + RESET)
+    return lines
 
 
 def render_info_static(sections, indent: str = "") -> None:
     """Печать инфоблока (для --no-logo)."""
-    for si, (title, items) in enumerate(sections):
-        sc = SECTION_COLORS[si % len(SECTION_COLORS)]
-        print(fg(sc) + BOLD + f"{indent}{title}" + RESET)
-        for key, value, pct in items:
-            print(indent + _format_line(key, value, pct,
-                                        bar_kind="uptime" if key == "Uptime" else None))
+    blocks = build_blocks(sections, rot=_rotation_offset())
+    for blk in blocks:
+        for line in _static_block_lines(blk):
+            print(indent + line)
         print()
 
 
@@ -1112,14 +1236,10 @@ def render_static(with_speed: bool = False) -> None:
     art_lines.append("")
     art_lines.append(fg(fire_color(0.3)) + " " * 6 + "by lostflam")
 
+    blocks = build_blocks(sections, rot=_rotation_offset())
     info_lines = [""]
-    for si, (title, items) in enumerate(sections):
-        sc = SECTION_COLORS[si % len(SECTION_COLORS)]
-        info_lines.append(fg(sc) + BOLD + f"  {title}" + RESET)
-        for key, value, pct in items:
-            info_lines.append("  " + _format_line(
-                key, value, pct,
-                bar_kind="uptime" if key == "Uptime" else None))
+    for blk in blocks:
+        info_lines.extend(_static_block_lines(blk))
         info_lines.append("")
 
     total = max(len(art_lines), len(info_lines))
@@ -1197,11 +1317,11 @@ class Particle:
 class InfoRow:
     """Строка инфоблока: заголовок раздела, пункт или пустая."""
     __slots__ = ("kind", "key", "value", "pct", "bar_kind", "color", "start",
-                 "anim", "phase", "shade")
+                 "anim", "phase", "shade", "si", "row_i")
 
     def __init__(self, kind, key="", value="", pct=None, bar_kind=None,
                  color=None, start=0, anim="typewriter", phase=0.0,
-                 shade=1.0):
+                 shade=1.0, si=0, row_i=0):
         self.kind = kind            # 'header' | 'kv' | 'blank'
         self.key = key
         self.value = value
@@ -1212,42 +1332,69 @@ class InfoRow:
         self.anim = anim            # анимация блока (свой код из ANIM_LIBRARY)
         self.phase = phase          # личный сдвиг тайминга строки
         self.shade = shade          # лёгкое затемнение цвета по позиции
+        self.si = si                # индекс блока (для цветового семейства)
+        self.row_i = row_i          # позиция строки внутри блока
 
 
-def build_info_rows(sections, rot: int = 0, frame_base: int = 0) -> list[InfoRow]:
-    """Собирает строки. Каждый блок — своя анимация из библиотеки (с ротацией
-    rot), каждая строка внутри блока — чуть темнее и со сдвигом тайминга.
-    frame_base — текущий кадр (для ротации без «схлопывания» каскада)."""
-    rows = []
+class Block:
+    """Блок инфоблока: заголовок + строки + геометрия рамки."""
+    __slots__ = ("si", "title", "rows", "y_top", "height", "width",
+                 "first_start", "last_start", "anim")
+
+    def __init__(self, si, title, rows, y_top, width, anim):
+        self.si = si
+        self.title = title
+        self.rows = rows
+        self.y_top = y_top          # строка верхней рамки
+        self.height = len(rows) + 2 # рамка сверху + строки + рамка снизу
+        self.width = width          # полная ширина рамки
+        self.first_start = rows[0].start if rows else 0
+        self.last_start = rows[-1].start if rows else 0
+        self.anim = anim
+
+
+def _row_content_width(key: str, value: str, pct: float | None) -> int:
+    """Ширина строки внутри рамки: коннектор + ключ + значение + бар."""
+    w = len(TREE_MID) + KEY_WIDTH + 1 + len(str(value))
+    if pct is not None:
+        w += 1 + 10 + 1              # пробел + бар (10) + запас
+    return w
+
+
+def build_blocks(sections, rot: int = 0, frame_base: int = 0,
+                 max_width: int = 100) -> list[Block]:
+    """Собирает блоки с рамками. Каждый блок — своя анимация из библиотеки
+    (с ротацией rot) и своё цветовое семейство; строки внутри блока —
+    та же анимация, но градиент темнее и сдвиг тайминга по позиции."""
+    blocks = []
+    y = 2
     frame = 6 + frame_base
     n_anim = len(ANIM_LIBRARY)
     for si, (title, items) in enumerate(sections):
-        sec_color = SECTION_COLORS[si % len(SECTION_COLORS)]
-        # анимация блока: базовая по индексу раздела + ротация запуска
+        real = [(k, v, p) for k, v, p in items if v is not None]
+        if not real:
+            continue
         block_anim = ANIM_LIBRARY[(si + rot) % n_anim]
-        rows.append(InfoRow("header", value=title, color=sec_color,
-                            start=frame, anim=block_anim,
-                            phase=si * 1.7))
-        frame += 2
-        kv_i = 0
-        n_items = len([1 for k, v, p in items if v is not None])
-        for key, value, pct in items:
-            if value is None:
-                continue
-            # в блоке строки идут по градиенту: чуть темнее вниз,
-            # тайминг сдвинут по позиции — «та же анимация, но немного другая»
-            depth = kv_i / max(n_items - 1, 1)
+        n_rows = len(real)
+        # ширина рамки — по самой длинной строке блока
+        content_w = max(_row_content_width(k, str(v), p) for k, v, p in real)
+        content_w = max(content_w, len(title) + 6)
+        width = min(content_w + 4, max_width)   # │ + пробел + контент + пробел + │
+
+        rows = []
+        for kv_i, (key, value, pct) in enumerate(real):
+            depth = kv_i / max(n_rows - 1, 1)
             shade = 1.0 - 0.35 * depth          # до 35% темнее к концу блока
             phase = si * 1.7 + kv_i * 0.55      # каскад внутри блока
             rows.append(InfoRow("kv", key=key, value=value, pct=pct,
                                 bar_kind="uptime" if key == "Uptime" else None,
                                 color=item_color(key), start=frame,
-                                anim=block_anim, phase=phase, shade=shade))
+                                anim=block_anim, phase=phase, shade=shade,
+                                si=si, row_i=kv_i))
             frame += 1 if kv_i % 2 == 0 else 0
-            kv_i += 1
-        rows.append(InfoRow("blank", start=frame))
-        frame += 1
-    return rows
+        blocks.append(Block(si, title, rows, y, width, block_anim))
+        y += n_rows + 3          # рамка + строки + рамка + пропуск
+    return blocks
 
 
 def _bar_cells(pct: float, width: int) -> list[tuple[str, int]]:
@@ -1280,11 +1427,15 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     # ротация: каждая сессия стартует со сдвигом набора анимаций
     rot = _rotation_offset()
     sections = build_sections(with_speed=with_speed)
-    info_rows = build_info_rows(sections, rot=rot)
+
+    art_w = max(len(l) for l in art)
+    info_col = art_w + 6
+    max_block_w = max(20, cols - info_col - 1)
+    blocks = build_blocks(sections, rot=rot, max_width=max_block_w)
     rot_frame = 0          # кадр, на котором пересобрали анимации
 
     # сколько строк нужно под инфоблок (+ логотип/подписи слева)
-    need_rows = len(info_rows) + 3
+    need_rows = max((b.y_top + b.height for b in blocks), default=0) + 3
     if rows < need_rows and not intro:
         print(f"Терминал мал: нужно ~{need_rows} строк, есть {rows}.")
         return
@@ -1298,11 +1449,10 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     flam_rows = list(range(2, 2 + len(flam)))
     quency_rows = list(range(2 + len(flam) + 1, 2 + len(flam) + 1 + len(quency)))
 
-    art_w = max(len(l) for l in art)
-    info_col = art_w + 6
-
-    # глитч-состояние: {индекс строки: кадр начала}
+    # глитч-состояние: {(индекс блока, индекс строки): кадр начала}
     glitch_rows = {}
+    # scanning-полоса медленно идёт вниз по инфоблоку
+    scan_span = max((b.y_top + b.height for b in blocks), default=20)
 
     sys.stdout.write("\033[2J\033[H" + "\033[?25l")
     sys.stdout.flush()
@@ -1322,8 +1472,8 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                 rot_frame = frame
                 rot = (rot + 1) % len(ANIM_LIBRARY)
                 # мягко сдвигаем тайминги, чтобы каскад не «схлопывался»
-                info_rows = build_info_rows(sections, rot=rot,
-                                            frame_base=frame)
+                blocks = build_blocks(sections, rot=rot, frame_base=frame,
+                                      max_width=max_block_w)
             canvas = [[" "] * cols for _ in range(rows)]
             ccolor = [[0] * cols for _ in range(rows)]
             cattr = [[""] * cols for _ in range(rows)]
@@ -1475,134 +1625,188 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                         else:
                             ccolor[ty][tx + i] = 226
 
-            # ===== инфоблок: печатающая машинка + shimmer + бары + скан-полоса =====
-            # scanning-полоса медленно идёт вниз по инфоблоку
-            scan_y = 2 + ((frame * 0.55) % (len(info_rows) + 10))
+            # ===== инфоблок: блоки с рамками, дерево, семейства цветов =====
+            fstyle = frame_style(frame)
+            scan_y = 2 + ((frame * 0.55) % (scan_span + 10))
 
-            # случайные цифровые глитчи на значениях
-            if frame % 61 == 0 and info_rows:
-                idx = random.randrange(len(info_rows))
-                if info_rows[idx].kind == "kv":
-                    glitch_rows[idx] = frame
+            # случайные цифровые глитчи на значениях (по блокам и строкам)
+            if frame % 61 == 0 and blocks:
+                bi = random.randrange(len(blocks))
+                if blocks[bi].rows:
+                    ri = random.randrange(len(blocks[bi].rows))
+                    glitch_rows[(bi, ri)] = frame
 
-            for ri, row in enumerate(info_rows):
-                y = 2 + ri
-                if y >= rows:
-                    break
-                st = row.start
-                if frame < st:
+            for blk in blocks:
+                si = blk.si
+                fam = block_family(si)
+                fam_dim = fam[min(3, len(fam) - 1)]      # приглушённый тон семейства
+                fam_bright = fam[0]                      # яркий тон семейства
+                fx = info_col                            # левый край рамки
+                fy = blk.y_top
+                fw = blk.width
+                if fy + blk.height > rows:
                     continue
-                prog = (frame - st + 1) * 8        # символов за кадр (быстрая печать)
-                scanned = abs(y - scan_y) < 1.3    # полоса проходит по строке
-                glitched = glitch_rows.get(ri, 0) and frame - glitch_rows[ri] < 3
-
-                if row.kind == "blank":
+                # рамка появляется, когда блок начинает печататься
+                if frame < blk.first_start:
                     continue
+                frame_prog = (frame - blk.first_start + 1) * 5
 
-                if row.kind == "header":
-                    title = row.value
-                    n = min(len(title), int(prog))
-                    for i in range(n):
-                        x = info_col + i
+                # ---- верхняя рамка: ╭─ заголовок ───╮ ----
+                top_y = fy
+                if top_y < rows:
+                    for i in range(fw):
+                        x = fx + i
                         if x >= cols:
                             break
-                        # огненный градиент, бегущий по заголовку
+                        if i >= frame_prog:
+                            break
+                        if i == 0:
+                            ch, col, at = FRAME_TL, fam_dim, ""
+                        elif i == fw - 1:
+                            ch, col, at = FRAME_TR, fam_dim, ""
+                        else:
+                            ch, col, at = frame_cell(fstyle, frame, FRAME_H,
+                                                     fx + i, fam_dim, fam_bright)
+                        canvas[top_y][x] = ch
+                        ccolor[top_y][x] = col
+                        if at:
+                            cattr[top_y][x] = at
+                    # заголовок сидит на верхней линии
+                    title = f" {blk.title} "
+                    n = min(len(title), int(frame_prog) - 2)
+                    for i in range(max(0, n)):
+                        x = fx + 2 + i
+                        if x >= cols:
+                            break
                         t = (i / max(len(title) - 1, 1) + frame * 0.04) % 1.0
-                        canvas[y][x] = title[i]
-                        ccolor[y][x] = fire_color(0.35 + 0.65 * t)
-                        cattr[y][x] = BOLD
-                    # огненный разделитель-подчёркивание в той же строке,
-                    # после заголовка (заголовок блока выделен отдельно)
-                    ul_len = min(len(title) + 26, cols - info_col)
-                    for i in range(n, ul_len):
-                        x = info_col + i
-                        if x >= cols:
-                            break
-                        if canvas[y][x] != " ":
-                            continue
-                        t = (i / max(ul_len - 1, 1) + frame * 0.06) % 1.0
-                        canvas[y][x] = "─"
-                        ccolor[y][x] = fire_color(0.25 + 0.55 * t)
+                        canvas[top_y][x] = title[i]
+                        ccolor[top_y][x] = fam_bright
+                        cattr[top_y][x] = BOLD
+
+                # ---- строки: │ ├─ ключ │ значение │ ----
+                for kv_i, row in enumerate(blk.rows):
+                    y = fy + 1 + kv_i
+                    if y >= rows:
+                        break
+                    st = row.start
+                    if frame < st:
+                        continue
+                    prog = (frame - st + 1) * 8        # символов за кадр
+                    scanned = abs(y - scan_y) < 1.3
+                    glitched = glitch_rows.get((si, kv_i), 0) and \
+                        frame - glitch_rows[(si, kv_i)] < 3
+
+                    # цвет строки: семейство блока + градиент + дыхание
+                    base = family_color(si, row.row_i, len(blk.rows), frame)
+                    fam_list = block_family(si)
+                    # лёгкий сдвиг тона внутри семейства по строке
+                    base = fam_list[min(len(fam_list) - 1,
+                                        fam_list.index(base) if base in fam_list else 0)]
+                    fresh = frame - st < 5
+                    key_base = 255 if fresh else base
+                    anim = row.anim
+                    phase = row.phase
+                    shade = row.shade
+
+                    # коннектор дерева: ├─ или └─ на последней строке
+                    is_last = kv_i == len(blk.rows) - 1
+                    conn = TREE_END if is_last else TREE_MID
+                    # цвет коннектора — приглушённый тон семейства
+                    conn_col = shade_color(fam_dim, 0.8)
+
+                    # боковые стенки рамки
+                    if fx < cols:
+                        canvas[y][fx] = FRAME_V
+                        ccolor[y][fx] = fam_dim
+                    rx = fx + fw - 1
+                    if rx < cols:
+                        canvas[y][rx] = FRAME_V
+                        ccolor[y][rx] = fam_dim
+
+                    seq = [(conn, conn_col, "", "conn"),
+                           (row.key.ljust(KEY_WIDTH), key_base,
+                            BOLD if math.sin(frame * 0.12 + phase) > -0.3 else "",
+                            "key"),
+                           (" ", COLOR_DIM, "", "gap"),
+                           (row.value, COLOR_VALUE, "", "value")]
+                    pos = 0
+                    for text, col, at, seg in seq:
+                        for j, ch in enumerate(text):
+                            gp = pos + j
+                            if gp >= prog:
+                                break
+                            x = fx + 1 + gp
+                            if x >= cols:
+                                break
+                            if seg == "conn":
+                                c, cc, ca = ch, col, at
+                            elif seg == "key":
+                                c, cc, ca = apply_anim(anim, ch, frame,
+                                                       phase + 0.4, gp,
+                                                       key_base, shade,
+                                                       fam_list, prog)
+                                if fresh:
+                                    cc = 255
+                            elif seg == "gap":
+                                c, cc, ca = ch, col, at
+                            else:
+                                c, cc, ca = apply_anim(anim, ch, frame, phase,
+                                                       gp, base, shade,
+                                                       fam_list, prog)
+                            if scanned and c != " ":
+                                cc = 255
+                            if glitched and c != " " and random.random() < 0.4:
+                                c = random.choice(GLITCH_GLYPHS)
+                                cc = random.choice([201, 51, 196])
+                            if c != " ":
+                                canvas[y][x] = c
+                                ccolor[y][x] = cc
+                                if ca or at:
+                                    cattr[y][x] = ca or at
+                        pos += len(text)
+
                     # курсор печатающей машинки
-                    if prog < len(title):
-                        x = info_col + int(prog)
+                    if prog < pos and anim == "typewriter":
+                        x = fx + 1 + int(prog)
                         if x < cols and canvas[y][x] == " ":
                             canvas[y][x] = "▌"
                             ccolor[y][x] = COLOR_CURSOR
-                    continue
 
-                # ---- kv-строка ----
-                key = row.key
-                value = row.value or "-"
-                pct = row.pct
-                base = row.color
-                anim = row.anim
-                phase = row.phase
-                shade = row.shade
-                pal_idx = palette_index(base)
-                # свежая строка вспыхивает белым
-                fresh = frame - st < 5
-                key_base = 255 if fresh else base
-                # лёгкий shimmer: пульс яркости ключа (совмещён с фазой строки)
-                key_attr = BOLD if math.sin(frame * 0.12 + phase) > -0.3 else ""
+                    # бар: растёт от 0 до целевого значения
+                    if row.pct is not None and pos + 1 < prog:
+                        grow = min(1.0, (prog - pos - 1) / 22.0)
+                        fill_pct = (row.pct or 0) * grow
+                        bx = fx + 1 + pos + 1
+                        for sym, bcol in _bar_cells(fill_pct, 10):
+                            if bx >= cols:
+                                break
+                            if sym != " ":
+                                canvas[y][bx] = sym
+                                ccolor[y][bx] = 255 if (scanned and sym == BAR_FILLED) else bcol
+                            bx += 1
 
-                seq = [(key.ljust(KEY_WIDTH), key_base, key_attr, "key"),
-                       ("│ ", COLOR_DIM, "", "sep"),
-                       (value, COLOR_VALUE, "", "value")]
-                pos = 0
-                for text, col, at, seg in seq:
-                    for j, ch in enumerate(text):
-                        gp = pos + j
-                        if gp >= prog:
-                            break
-                        x = info_col + gp
+                # ---- нижняя рамка: ╰──────╯ ----
+                bot_y = fy + blk.height - 1
+                if bot_y < rows:
+                    # низ появляется, когда допечатана последняя строка
+                    bot_prog = (frame - blk.last_start + 1) * 5
+                    for i in range(fw):
+                        x = fx + i
                         if x >= cols:
                             break
-                        # применяем анимацию блока (ключ — тоже участвует,
-                        # но с базовым цветом пункта и своей фазой)
-                        if seg == "key":
-                            c, cc, ca = apply_anim(anim, ch, frame, phase + 0.4,
-                                                   gp, key_base, shade,
-                                                   palette_index(key_base), prog)
-                            if fresh:
-                                cc = 255
-                        else:
-                            c, cc, ca = apply_anim(anim, ch, frame, phase,
-                                                   gp, base, shade,
-                                                   pal_idx, prog)
-                            if seg == "sep":
-                                c, cc, ca = ch, col, at
-                        if scanned and c != " ":
-                            cc = 255          # полоса подсвечивает строку
-                        if glitched and c != " " and random.random() < 0.4:
-                            c = random.choice(GLITCH_GLYPHS)
-                            cc = random.choice([201, 51, 196])
-                        if c != " ":
-                            canvas[y][x] = c
-                            ccolor[y][x] = cc
-                            if ca or at:
-                                cattr[y][x] = ca or at
-                    pos += len(text)
-
-                # курсор печатающей машинки (для typewriter-блока и недописанных)
-                if prog < pos and anim == "typewriter":
-                    x = info_col + int(prog)
-                    if x < cols and canvas[y][x] == " ":
-                        canvas[y][x] = "▌"
-                        ccolor[y][x] = COLOR_CURSOR
-
-                # бар: растёт от 0 до целевого значения
-                if pct is not None and pos + 1 < prog:
-                    grow = min(1.0, (prog - pos - 1) / 22.0)
-                    fill_pct = (pct or 0) * grow
-                    bx = info_col + pos + 1
-                    for sym, bcol in _bar_cells(fill_pct, 10):
-                        if bx >= cols:
+                        if i >= bot_prog:
                             break
-                        if sym != " ":
-                            canvas[y][bx] = sym
-                            ccolor[y][bx] = 255 if (scanned and sym == BAR_FILLED) else bcol
-                        bx += 1
+                        if i == 0:
+                            ch, col, at = FRAME_BL, fam_dim, ""
+                        elif i == fw - 1:
+                            ch, col, at = FRAME_BR, fam_dim, ""
+                        else:
+                            ch, col, at = frame_cell(fstyle, frame, FRAME_H,
+                                                     fx + i, fam_dim, fam_bright)
+                        canvas[bot_y][x] = ch
+                        ccolor[bot_y][x] = col
+                        if at:
+                            cattr[bot_y][x] = at
 
             # ===== вывод кадра =====
             out = ["\033[H"]
@@ -1665,7 +1869,7 @@ def main():
                         help="только системная информация, без логотипа")
     parser.add_argument("--speed", "-s", action="store_true",
                         help="сделать быстрый спидтест (добавляет ~2-8 сек)")
-    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.4.0")
+    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.5.0")
     args = parser.parse_args()
 
     if args.no_logo:
