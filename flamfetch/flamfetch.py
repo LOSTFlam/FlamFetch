@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.1
+Версия: 1.9.2
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.1"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.2"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -156,6 +156,8 @@ RU = {
     "WAN IP": "Внеш. IP",
     "Speed": "Скорость",
     "Ping": "Пинг",
+    "Clock": "Время",
+    "Weather": "Погода",
     # ключи — Тема
     "GTK": "GTK",
     "Icons": "Иконки",
@@ -352,10 +354,59 @@ def _resample(pal: list[int], n: int) -> list[int]:
 _MAX_SECTIONS = 6
 
 
+# ============================================================ наборы палитр
+#
+# Готовые палитры «одной кнопкой»: --theme-swap перебирает их по кругу,
+# --palette NAME выбирает конкретную. Каждая палитра — 6 цветов блоков,
+# отсортированных от светлого к тёмному (как родная палитра темы).
+
+NAMED_PALETTES = {
+    "fire":    [220, 214, 208, 202, 196, 88],
+    "ice":     [159, 123, 117, 81, 75, 39],
+    "forest":  [157, 121, 115, 79, 71, 22],
+    "neon":    [213, 177, 141, 99, 63, 27],
+    "sunset":  [224, 217, 210, 203, 197, 130],
+    "mono":    [255, 251, 248, 245, 243, 240],
+    "candy":   [218, 212, 176, 140, 98, 54],
+}
+
+_PALETTE_SWAP = None      # None = палитра темы; имя = принудительная
+
+
+def use_palette(name: str | None) -> None:
+    """Включает именованную палитру (None — вернуть палитру темы)."""
+    global _PALETTE_SWAP
+    _PALETTE_SWAP = name
+
+
+def get_palette(name: str | None = None) -> list[int]:
+    """Палитра по имени или текущая (свап/тема)."""
+    global _PALETTE_SWAP
+    name = name or _PALETTE_SWAP
+    if name and name in NAMED_PALETTES:
+        return sorted(NAMED_PALETTES[name], key=_lum, reverse=True)
+    return None
+
+
+def swap_palette() -> str:
+    """Переключает палитру по кругу, возвращает новое имя."""
+    global _PALETTE_SWAP
+    names = list(NAMED_PALETTES)
+    if _PALETTE_SWAP is None:
+        _PALETTE_SWAP = names[0]
+    else:
+        i = (names.index(_PALETTE_SWAP) + 1) % len(names)
+        _PALETTE_SWAP = names[i]
+    return _PALETTE_SWAP
+
+
 def palette_for_sections(n: int = _MAX_SECTIONS) -> list[int]:
-    """Палитра темы, приведённая ровно к n цветам, строго от самого
+    """Палитра, приведённая ровно к n цветам, строго от самого
     светлого к самому тёмному. Блоки и строка Palette используют её —
     так порядок палитры и порядок блоков сверху-вниз совпадают."""
+    forced = get_palette()
+    if forced:
+        return _resample(forced, n)
     pal = get_theme_palette()
     if not pal:
         pal = sorted([196, 208, 215, 154, 51, 141, 99],
@@ -885,6 +936,8 @@ KEY_ICONS = {
     "WAN IP": "\uf0c0",
     "Speed": "\uf0e4",
     "Ping": "\uf0e4",
+    "Clock": "\uf017",
+    "Weather": "\uf0c2",
     "GTK": "\uf1fc",
     "Icons": "\uf03e",
     "Font": "\uf031",
@@ -1185,7 +1238,10 @@ def get_banner_art() -> list[str]:
         return []
     if BANNER_TEXT and BANNER_TEXT != "FLAMFETCH":
         return text_to_banner(BANNER_TEXT)
-    return BANNER_ART
+    # выравниваем все строки по самой длинной — иначе нижние строки
+    # (без trailing-пробелов) сдвигают буквы H влево
+    w = max(len(l) for l in BANNER_ART)
+    return [l.ljust(w) for l in BANNER_ART]
 
 
 # --- блочный шрифт 5x5 для произвольного текста (--banner TEXT) ---
@@ -2513,7 +2569,8 @@ def _parse_battery() -> tuple[int, str] | None:
     return None
 
 
-def build_sections(with_speed: bool = False, with_ping: bool = False) -> list[tuple[str, list[tuple[str, str, float | None]]]]:
+def build_sections(with_speed: bool = False, with_ping: bool = False,
+                   with_clock: bool = False, with_weather: bool = False) -> list[tuple[str, list[tuple[str, str, float | None]]]]:
     """Возвращает [(заголовок, [(ключ, значение, бар%), ...]), ...]
     with_speed=True — делает спидтест (медленно, ~2-8 сек)."""
     host, os_name = get_host()
@@ -2554,6 +2611,8 @@ def build_sections(with_speed: bool = False, with_ping: bool = False) -> list[tu
         ("Kernel", get_kernel(), None),
         ("Uptime", get_uptime(), min(100.0, up_sec / (7 * 86400) * 100)),
     ]
+    if with_clock:
+        sys_items.append(("Clock", get_clock(), None))
     if board:
         sys_items.append(("Board", board, None))
     if bios:
@@ -2663,6 +2722,10 @@ def build_sections(with_speed: bool = False, with_ping: bool = False) -> list[tu
         p = get_ping()
         if p:
             net_items.append(("Ping", p, None))
+    if with_weather:
+        w = get_weather()
+        if w:
+            net_items.append(("Weather", w, None))
     if net_items:
         sections.append(("◈ Network", net_items))
 
@@ -2775,6 +2838,21 @@ def print_palette_hex() -> None:
     for i, c in enumerate(palette_for_sections(_MAX_SECTIONS)):
         print(f"{_hex256(c)}")
 
+
+def get_weather() -> str | None:
+    """Погода из wttr.in (компактный формат). None если недоступно."""
+    out = _run(["curl", "-s", "--max-time", "4",
+                "https://wttr.in/?format=%c%t+%C+%h"])
+    if out and "%" in out and "Unknown" not in out:
+        return " ".join(out.split())
+    return None
+
+
+def get_clock() -> str:
+    """Текущее время — для --clock и живых часов в анимации."""
+    import datetime
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
 KEY_WIDTH = 12
 
 
@@ -2844,11 +2922,13 @@ def render_info_static(sections, indent: str = "") -> None:
 
 # ============================================================ рендер (статика)
 
-def render_static(with_speed: bool = False, with_ping: bool = False) -> None:
+def render_static(with_speed: bool = False, with_ping: bool = False,
+                  with_clock: bool = False, with_weather: bool = False) -> None:
     """Отрисовывает баннер + логотип + инфу, выходит."""
     art = get_art()
     banner = get_banner_art()
-    sections = build_sections(with_speed=with_speed, with_ping=with_ping)
+    sections = build_sections(with_speed=with_speed, with_ping=with_ping,
+                              with_clock=with_clock, with_weather=with_weather)
     user = os.environ.get("USER", "user")
     host = socket.gethostname()
     icon = get_distro_icon()
@@ -3055,7 +3135,8 @@ def _bar_cells(pct: float, width: int) -> list[tuple[str, int]]:
 
 
 def render_animated(intro: float = 0.0, with_speed: bool = False,
-                    with_ping: bool = False) -> None:
+                    with_ping: bool = False, with_clock: bool = False,
+                    with_weather: bool = False) -> None:
     global BANNER_ENABLED
     art = get_art()
     banner = get_banner_art()
@@ -3072,7 +3153,8 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
 
     # ротация: каждая сессия стартует со сдвигом набора анимаций
     rot = _rotation_offset()
-    sections = build_sections(with_speed=with_speed, with_ping=with_ping)
+    sections = build_sections(with_speed=with_speed, with_ping=with_ping,
+                              with_clock=with_clock, with_weather=with_weather)
 
     art_w = max((max(len(l) for l in art) if art else 0), banner_w)
     info_col = art_w + 6
@@ -3177,6 +3259,10 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                 rot = (rot + 1) % len(ANIM_LIBRARY)
                 blocks = build_blocks(sections, rot=rot,
                                       frame_base=frame, max_width=max_block_w)
+            elif k == "p":
+                # смена палитры на ходу: по кругу именованных
+                new_pal = swap_palette()
+                # мягко мигнём — цвет палитры обновится сам
             if paused:
                 time.sleep(0.05)
                 continue
@@ -3196,7 +3282,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
             cattr = [[""] * cols for _ in range(rows)]
             glow = [[0.0] * cols for _ in range(rows)]
 
-            # ---- баннер FLAMFETCH: огненный градиент + иконка поверх ----
+            # ---- баннер FLAMFETCH: огненный градиент + firewave ----
             for ri, line in enumerate(banner):
                 y = banner_rows[ri]
                 if y >= rows:
@@ -3211,9 +3297,20 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                     t = ri / max(len(banner) - 1, 1)
                     ct = 0.30 + 0.65 * (1.0 - t)
                     pulse = 0.10 * math.sin(beat(frame, 2.0) + ci * 0.3 + ri)
-                    ccolor[y][x] = fire_color(max(0.0, min(1.0, ct + pulse)))
+                    # firewave: горизонтальная волна жары бежит по буквам
+                    wave = 0.5 + 0.5 * math.sin(ci * 0.45 - beat(frame, 2.5))
+                    ccolor[y][x] = fire_color(max(0.0, min(1.0,
+                                                    ct + pulse + 0.18 * wave)))
                     if random.random() < 0.02:      # редкие искры на буквах
                         ccolor[y][x] = random.choice([255, 226, 220])
+                    # жар от букв — для glow-свечения
+                    if wave > 0.7:
+                        for dy in (-1, 0, 1):
+                            for dx in (-1, 0, 1):
+                                ny, nx = y + dy, x + dx
+                                if 0 <= ny < rows and 0 <= nx < cols:
+                                    glow[ny][nx] = max(glow[ny][nx],
+                                                       0.25 * wave)
 
             # ---- Flam: пламя + свечение ----
             for ri, line in enumerate(flam):
@@ -3343,6 +3440,29 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                                 ny, nx = sy + dy, sx + i + dx
                                 if 0 <= ny < rows and 0 <= nx < cols and canvas[ny][nx] == " ":
                                     glow[ny][nx] = max(glow[ny][nx], 0.5)
+
+            # ---- живые часы (--clock): текущее время под подписью ----
+            if with_clock:
+                clock = get_clock()
+                cx, cy = 6, sy + 2
+                if 0 <= cy < rows:
+                    for i, ch in enumerate(clock):
+                        if cx + i < cols:
+                            canvas[cy][cx + i] = ch
+                            ccolor[cy][cx + i] = 255
+                            cattr[cy][cx + i] = BOLD
+                            for dy in (-1, 0, 1):
+                                for dx in (-1, 0, 1):
+                                    ny, nx = cy + dy, cx + i + dx
+                                    if 0 <= ny < rows and 0 <= nx < cols \
+                                            and canvas[ny][nx] == " ":
+                                        glow[ny][nx] = max(glow[ny][nx], 0.4)
+                    # двоеточия мигают
+                    if ":" in clock:
+                        if int(beat(frame, 1.0) * 2) % 2 == 0:
+                            for i, ch in enumerate(clock):
+                                if ch == ":" and cx + i < cols:
+                                    cattr[cy][cx + i] = DIM
 
             # ---- заголовок user@host под артом ----
             user = os.environ.get("USER", "user")
@@ -3671,6 +3791,19 @@ def main():
                         help="custom banner text instead of FLAMFETCH")
     parser.add_argument("--no-banner", action="store_true",
                         help="hide the block banner entirely")
+    parser.add_argument("--palette", type=str, default=None,
+                        metavar="NAME",
+                        help="force palette: " + "/".join([
+                            "fire", "ice", "forest", "neon", "sunset",
+                            "mono", "candy"]))
+    parser.add_argument("--theme-swap", action="store_true",
+                        help="cycle through named palettes")
+    parser.add_argument("--clock", action="store_true",
+                        help="show current time in System section")
+    parser.add_argument("--weather", action="store_true",
+                        help="show weather from wttr.in in Network")
+    parser.add_argument("--copy", action="store_true",
+                        help="copy output to clipboard (xclip/wl-copy/pbcopy)")
     parser.add_argument("--json", action="store_true",
                         help="machine-readable JSON output")
     parser.add_argument("--palette-hex", action="store_true",
@@ -3715,15 +3848,29 @@ def main():
     if args.no_banner or cfg.get("no_banner", "").lower() == "true":
         BANNER_ENABLED = False
 
+    # палитра: --theme-swap циклически, --palette NAME — принудительно
+    if args.theme_swap:
+        use_palette(swap_palette())
+        print(f"# palette: {_PALETTE_SWAP}", file=sys.stderr)
+    elif args.palette:
+        if args.palette in NAMED_PALETTES:
+            use_palette(args.palette)
+        else:
+            parser.error(f"unknown palette: {args.palette} "
+                         f"(have: {', '.join(NAMED_PALETTES)})")
+
     if args.no_logo:
-        sections = build_sections(with_speed=args.speed, with_ping=args.ping)
+        sections = build_sections(with_speed=args.speed, with_ping=args.ping,
+                                  with_clock=args.clock, with_weather=args.weather)
         render_info_static(sections)
         return
 
     if args.animate:
-        render_animated(args.intro, with_speed=args.speed, with_ping=args.ping)
+        render_animated(args.intro, with_speed=args.speed, with_ping=args.ping,
+                        with_clock=args.clock, with_weather=args.weather)
     else:
-        render_static(with_speed=args.speed, with_ping=args.ping)
+        render_static(with_speed=args.speed, with_ping=args.ping,
+                      with_clock=args.clock, with_weather=args.weather)
 
 
 if __name__ == "__main__":
