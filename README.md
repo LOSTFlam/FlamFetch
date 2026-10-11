@@ -147,8 +147,44 @@ curl -fsSL https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.s
 sudo pacman -Sy flamfetch
 
 # Debian/Ubuntu (.deb), Fedora (.rpm) — см. INSTALL-DEBIAN.md / INSTALL-RPM.md
-# Windows (Scoop/Winget/вручную) — см. INSTALL-WINDOWS.md
+# Windows — см. ниже
 ```
+
+### 🪟 Windows — установка одной кнопкой
+
+**PowerShell → вставить одну строку → Enter.** Установщик сам сделает всё:
+найдёт пакетный менеджер (winget/scoop/choco), поставит Python 3,
+установит pyfiglet, скачает фетч и создаст команду `flamfetch`:
+
+```powershell
+irm https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.ps1 | iex
+```
+
+Что умеет установщик:
+
+| Шаг | Действие |
+|-----|----------|
+| 1 | Определяет пакетный менеджер: winget → scoop → choco (если нет — подскажет) |
+| 2 | Ставит Python 3, если не найден |
+| 3 | Ставит pyfiglet через pip |
+| 4 | Скачивает `flamfetch.py` в `%USERPROFILE%\.local\share\flamfetch\` |
+| 5 | Создаёт `flamfetch.cmd` / `flamfetch.ps1` в `%USERPROFILE%\.local\bin\` и добавляет в PATH |
+| 6 | Запускает фетч для проверки |
+
+После установки откройте **новый** терминал и введите `flamfetch`.
+
+**Альтернатива — через пакетный менеджер:**
+
+```powershell
+# Scoop
+scoop install flamfetch
+
+# Winget (когда появится в каталоге)
+winget install LOSTFlam.FlamFetch
+```
+
+**Или вручную** — см. [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md):
+Scoop bucket, portable ZIP, ручная установка через Python.
 
 FlamFetch определяет пакеты через `pacman`, `dpkg`, `rpm` — и подстраивает
 цвета под тему **любой** ОС: Omarchy → GTK → конфиг терминала
@@ -191,12 +227,49 @@ digital glitches.
 #   Server = https://lostflam.github.io/FlamFetch/repo/$arch
 sudo pacman -Sy flamfetch
 
+# Universal installer — detects your package manager
+# (pacman/apt/dnf/xbps) or installs to ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.sh | bash
+
 # Manual
 git clone https://github.com/LOSTFlam/FlamFetch
 cd FlamFetch
 sudo install -Dm755 flamfetch/flamfetch.py /usr/bin/flamfetch
 pip install pyfiglet
 ```
+
+### 🪟 Windows — one-click install
+
+**PowerShell → paste one line → Enter.** The installer does everything:
+finds a package manager (winget/scoop/choco), installs Python 3,
+installs pyfiglet, downloads the fetch and creates a `flamfetch` command:
+
+```powershell
+irm https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.ps1 | iex
+```
+
+| Step | What it does |
+|------|--------------|
+| 1 | Detects package manager: winget → scoop → choco (or guides you) |
+| 2 | Installs Python 3 if not found |
+| 3 | Installs pyfiglet via pip |
+| 4 | Downloads `flamfetch.py` to `%USERPROFILE%\.local\share\flamfetch\` |
+| 5 | Creates `flamfetch.cmd` / `flamfetch.ps1` in `%USERPROFILE%\.local\bin\` and adds it to PATH |
+| 6 | Runs the fetch as a smoke test |
+
+Open a **new** terminal afterwards and type `flamfetch`.
+
+Alternative — via package manager:
+
+```powershell
+# Scoop
+scoop install flamfetch
+
+# Winget (once listed in the catalog)
+winget install LOSTFlam.FlamFetch
+```
+
+Or manually — see [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md).
 
 ### Usage
 

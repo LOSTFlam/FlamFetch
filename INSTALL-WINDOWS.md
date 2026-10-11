@@ -3,7 +3,38 @@
 Полностью совместимый порт: те же рамки, анимации и палитра — только данные
 берутся из систем Windows (реестр, WMI через ctypes, tasklist, netsh).
 
-## Способ 1 — Scoop (рекомендуется)
+## Способ 0 — установка одной кнопкой ⚡ (рекомендуется)
+
+**PowerShell → вставить одну строку → Enter.** Всё остальное установщик
+сделает сам:
+
+```powershell
+irm https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.ps1 | iex
+```
+
+Установщик автоматически:
+
+1. **Находит пакетный менеджер** — winget → scoop → choco (если ни одного нет —
+   откроет Microsoft Store и подскажет, как поставить winget)
+2. **Ставит Python 3** (если не найден)
+3. **Ставит pyfiglet** через pip
+4. **Скачивает `flamfetch.py`** в `%USERPROFILE%\.local\share\flamfetch\`
+5. **Создаёт команду `flamfetch`** (`flamfetch.cmd` + `flamfetch.ps1`) в
+   `%USERPROFILE%\.local\bin\` и добавляет этот путь в PATH
+6. **Запускает фетч** для проверки
+
+После установки откройте **новый** терминал и введите:
+
+```powershell
+flamfetch                # стандартный фетч
+flamfetch --animate      # живая анимация
+flamfetch --lang ru      # русский интерфейс
+```
+
+> 💡 Если winget «не находится» — он идёт в составе «App Installer» из
+> Microsoft Store: [apps.microsoft.com/detail/9nblggh4nns1](https://apps.microsoft.com/detail/9nblggh4nns1)
+
+## Способ 1 — Scoop
 
 ```powershell
 scoop bucket add flamfetch https://github.com/LOSTFlam/FlamFetch
