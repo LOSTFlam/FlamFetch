@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.8.2
+Версия: 1.8.3
 """
 
 import argparse
@@ -1115,6 +1115,29 @@ def get_art() -> list[str]:
     return pyfiglet.figlet_format("Flam\nquency", font="slant").rstrip("\n").split("\n")
 
 
+# ============================================================ блочный баннер
+#
+# Название фетча крупным блочным шрифтом (ANSI Shadow) — тот же, что в
+# install.ps1. Баннер идёт ВЕРХУ над slant-артом, а поверх него, как
+# главный элемент, выводится иконка дистрибутива (или Windows/macOS):
+# она печатается bold белым с огненным гало, а буквы под ней гаснут —
+# иконка читается как «лицо» программы.
+
+BANNER_ART = [
+    "███████╗██╗      █████╗ ███╗   ███╗███████╗███████╗████████╗ ██████╗ ██╗  ██╗",
+    "██╔════╝██║     ██╔══██╗████╗ ████║██╔════╝██╔════╝╚══██╔══╝██╔════╝ ██║  ██║",
+    "█████╗  ██║     ███████║██╔████╔██║█████╗  █████╗     ██║   ██║      ███████║",
+    "██╔══╝  ██║     ██╔══██║██║╚██╔╝██║██╔══╝  ██╔══╝     ██║   ██║      ██╔══██║",
+    "██║     ███████╗██║  ██║██║ ╚═╝ ██║██║     ███████╗   ██║   ╚██████╗██║  ██║ ",
+    "╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚══════╝   ╚═╝    ╚═════╝╚═╝  ╚═╝ ",
+]
+
+
+def get_banner_art() -> list[str]:
+    """Блочный баннер FLAMFETCH — строки фиксированной ширины."""
+    return BANNER_ART
+
+
 # ============================================================ системная инфа
 
 def _run(cmd: list[str]) -> str | None:
@@ -1894,18 +1917,21 @@ def get_distro_icon() -> str:
                 distro = line.split("=", 1)[1].strip('"').lower()
                 break
     icons = {
-        "arch": "",
-        "endeavouros": "",
-        "manjaro": "",
-        "omarchy": "",
-        "ubuntu": "",
-        "debian": "",
-        "fedora": "",
-        "nixos": "",
-        "gentoo": "",
-        "void": "",
+        "arch": "\uf303",
+        "endeavouros": "\uf303",
+        "manjaro": "\uf312",
+        "omarchy": "\uf303",
+        "ubuntu": "\uf31b",
+        "debian": "\uf306",
+        "fedora": "\uf30a",
+        "nixos": "\uf313",
+        "gentoo": "\uf30d",
+        "void": "\uf17c",
+        "windows": "\uf17a",
+        "macos": "\uf179",
+        "darwin": "\uf179",
     }
-    return icons.get(distro, "󰣇")
+    return icons.get(distro, "\uf303")
 
 
 def get_theme() -> dict[str, str]:
@@ -2633,13 +2659,37 @@ def render_info_static(sections, indent: str = "") -> None:
 # ============================================================ рендер (статика)
 
 def render_static(with_speed: bool = False) -> None:
-    """Отрисовывает логотип + инфу, выходит."""
+    """Отрисовывает баннер + логотип + инфу, выходит."""
     art = get_art()
+    banner = get_banner_art()
     sections = build_sections(with_speed=with_speed)
     user = os.environ.get("USER", "user")
     host = socket.gethostname()
+    icon = get_distro_icon()
 
     art_lines = []
+    # ---- блочный баннер FLAMFETCH: огненный градиент + иконка поверх ----
+    banner_w = max(len(l) for l in banner)
+    # иконка поверх баннера — «главный» элемент: занимает центр слова
+    # FLAMFETCH, буквы под ней гасятся, сама — bold белым с огненным гало
+    icon = get_distro_icon()
+    icon_x = 37                      # центр баннера (слово FETCH)
+    icon_y = len(banner) // 2        # средняя строка баннера
+    for ri, line in enumerate(banner):
+        t = ri / max(len(banner) - 1, 1)
+        ct = 0.35 + 0.65 * (1.0 - t)
+        art_lines.append(fg(fire_color(ct)) + line)
+    # стираем буквы под иконкой и рисуем её
+    b_line = banner[icon_y]
+    left = b_line[:icon_x]
+    right = b_line[icon_x + 2:]
+    t = icon_y / max(len(banner) - 1, 1)
+    ct = 0.35 + 0.65 * (1.0 - t)
+    art_lines[icon_y] = (fg(fire_color(ct)) + left + RESET
+                         + fg(255) + BOLD + icon + RESET
+                         + fg(fire_color(ct)) + right)
+    art_lines.append("")
+    # ---- slant-арт: как было ----
     for ri, line in enumerate(art):
         t = ri / max(len(art) - 1, 1)
         ct = 0.35 + 0.65 * (1.0 - t)
@@ -2833,9 +2883,15 @@ def _bar_cells(pct: float, width: int) -> list[tuple[str, int]]:
 
 def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     art = get_art()
+    banner = get_banner_art()
     flam = art[:5]
     quency = art[7:]
-    art_h = len(art)
+    art_h = len(banner) + 1 + len(art)   # баннер + пропуск + slant-арт
+    banner_w = max(len(l) for l in banner)
+    banner_rows = list(range(2, 2 + len(banner)))
+    distro_icon = get_distro_icon()
+    icon_x = 37                          # центр баннера (слово FETCH)
+    icon_y = banner_rows[len(banner) // 2]
 
     try:
         cols, rows = os.get_terminal_size()
@@ -2846,7 +2902,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     rot = _rotation_offset()
     sections = build_sections(with_speed=with_speed)
 
-    art_w = max(len(l) for l in art)
+    art_w = max(max(len(l) for l in art), banner_w)
     info_col = art_w + 6
     max_block_w = max(20, cols - info_col - 1)
     blocks = build_blocks(sections, rot=rot, max_width=max_block_w)
@@ -2864,8 +2920,10 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
     max_frames = int(intro / 0.08) + 4 if intro else 0
     deadline = start + intro + 0.5 if intro else None
 
-    flam_rows = list(range(2, 2 + len(flam)))
-    quency_rows = list(range(2 + len(flam) + 1, 2 + len(flam) + 1 + len(quency)))
+    flam_rows = list(range(2 + len(banner) + 1,
+                           2 + len(banner) + 1 + len(flam)))
+    quency_rows = list(range(2 + len(banner) + 1 + len(flam) + 1,
+                             2 + len(banner) + 1 + len(flam) + 1 + len(quency)))
 
     # глитч-состояние: {(индекс блока, индекс строки): кадр начала}
     glitch_rows = {}
@@ -2896,6 +2954,28 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
             ccolor = [[0] * cols for _ in range(rows)]
             cattr = [[""] * cols for _ in range(rows)]
             glow = [[0.0] * cols for _ in range(rows)]
+
+            # ---- баннер FLAMFETCH: огненный градиент + иконка поверх ----
+            for ri, line in enumerate(banner):
+                y = banner_rows[ri]
+                if y >= rows:
+                    break
+                for ci, ch in enumerate(line):
+                    if ch == " ":
+                        continue
+                    x = ci + 2
+                    if not (0 <= x < cols):
+                        continue
+                    # иконка поверх баннера: буквы под ней гаснут
+                    if y == icon_y and icon_x <= x < icon_x + 2:
+                        continue
+                    canvas[y][x] = ch
+                    t = ri / max(len(banner) - 1, 1)
+                    ct = 0.30 + 0.65 * (1.0 - t)
+                    pulse = 0.10 * math.sin(beat(frame, 2.0) + ci * 0.3 + ri)
+                    ccolor[y][x] = fire_color(max(0.0, min(1.0, ct + pulse)))
+                    if random.random() < 0.02:      # редкие искры на буквах
+                        ccolor[y][x] = random.choice([255, 226, 220])
 
             # ---- Flam: пламя + свечение ----
             for ri, line in enumerate(flam):
@@ -2998,11 +3078,13 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     continue
                 tx, ty = int(p.px), int(p.py)
                 if (0 <= tx < cols and 0 <= ty < rows and canvas[ty][tx] == " "
+                        and (ty, tx) not in icon_cells
                         and p.kind == "fire" and p.life < p.max_life * 0.7):
                     canvas[ty][tx] = random.choice(["·", ".", " "])
                     ccolor[ty][tx] = 52 if p.life > 6 else 238
                 x, y = int(p.x), int(p.y)
-                if 0 <= x < cols and 0 <= y < rows and canvas[y][x] == " ":
+                if 0 <= x < cols and 0 <= y < rows and canvas[y][x] == " " \
+                        and (y, x) not in icon_cells:
                     canvas[y][x] = p.char
                     ccolor[y][x] = p.color()
                 alive.append(p)
@@ -3276,6 +3358,24 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                         if at:
                             cattr[bot_y][x] = at
 
+            # иконка дистрибутива: bold белая, с огненным гало — «главный» элемент.
+            # Рисуется в самом конце — поверх всех частиц и глитчей.
+            icon_cells = set()
+            if 0 <= icon_y < rows:
+                for i, ch in enumerate(distro_icon):
+                    x = icon_x + i
+                    if 0 <= x < cols:
+                        canvas[icon_y][x] = ch
+                        ccolor[icon_y][x] = 255
+                        cattr[icon_y][x] = BOLD
+                        icon_cells.add((icon_y, x))
+                for dy in (-1, 0, 1):
+                    for dx in (-2, -1, 0, 1, 2):
+                        ny, nx = icon_y + dy, icon_x + dx
+                        if 0 <= ny < rows and 0 <= nx < cols:
+                            glow[ny][nx] = max(glow[ny][nx],
+                                               0.45 + 0.2 * math.sin(beat(frame, 3.0)))
+
             # ===== вывод кадра =====
             out = ["\033[H"]
             for y in range(rows):
@@ -3343,7 +3443,7 @@ def main():
     parser.add_argument("--lang", "-l", choices=["en", "ru"], default=None,
                         help="interface language (default: en; env FLAMFETCH_LANG)")
     parser.add_argument("--version", "-V", action="version",
-                        version="flamfetch 1.8.2")
+                        version="flamfetch 1.8.3")
     args = parser.parse_args()
 
     # язык: флаг > переменная окружения > системная локаль > en

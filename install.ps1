@@ -14,7 +14,7 @@
 $ErrorActionPreference = "Stop"
 $Repo  = "https://github.com/LOSTFlam/FlamFetch"
 $Raw   = "https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/flamfetch/flamfetch.py"
-$Ver   = "1.8.2"
+$Ver   = "1.8.3"
 $BinDir   = Join-Path $env:USERPROFILE ".local\bin"
 $ShareDir = Join-Path $env:USERPROFILE ".local\share\flamfetch"
 
