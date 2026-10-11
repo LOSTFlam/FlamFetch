@@ -243,6 +243,83 @@ def brighten_color(code: int, factor: float) -> int:
     return shade_color(code, factor)
 
 
+# ---- плавные оттенки через настоящий RGB ----
+#
+# shade_color округляет к уровням куба и на тёмных цветах теряет
+# вариации (88 осветлённое == 88). Эти функции интерполируют к белому
+# или чёрному в RGB и мапят в ближайший 256-цвет — оттенки плавные.
+
+def _rgb256(code: int) -> tuple[int, int, int]:
+    """256-код → (r, g, b) 0..255."""
+    if 16 <= code < 232:
+        ci = code - 16
+        return _CUBE[ci // 36], _CUBE[(ci // 6) % 6], _CUBE[ci % 6]
+    if 232 <= code < 256:
+        v = (code - 232) * 10
+        return v, v, v
+    return 0, 0, 0
+
+
+def _nearest256(r: int, g: int, b: int) -> int:
+    """(r, g, b) → ближайший 256-цвет (куб или серый)."""
+    if abs(r - g) < 12 and abs(g - b) < 12 and abs(r - b) < 12:
+        v = max(0, min(255, r))
+        return 232 + max(0, min(23, round(v / 10)))
+    return 16 + min(5, round(r / 51)) * 36 \
+              + min(5, round(g / 51)) * 6 \
+              + min(5, round(b / 51))
+
+
+def shade_rgb(code: int, factor: float) -> int:
+    """Оттенок через RGB: <1 — к чёрному, >1 — к белому."""
+    if factor == 1.0:
+        return code
+    r, g, b = _rgb256(code)
+    if factor < 1:
+        r, g, b = r * factor, g * factor, b * factor
+    else:
+        t = factor - 1
+        r = r + (255 - r) * t
+        g = g + (255 - g) * t
+        b = b + (255 - b) * t
+    return _nearest256(int(r), int(g), int(b))
+
+
+def _resample(pal: list[int], n: int) -> list[int]:
+    """Интерполирует палитру ровно до n цветов (в RGB)."""
+    if not pal:
+        return []
+    if len(pal) == 1:
+        return [pal[0]] * n
+    out = []
+    for i in range(n):
+        t = i / max(n - 1, 1) * (len(pal) - 1)
+        a = int(t)
+        b = min(a + 1, len(pal) - 1)
+        f = t - a
+        r1, g1, b1 = _rgb256(pal[a])
+        r2, g2, b2 = _rgb256(pal[b])
+        out.append(_nearest256(int(r1 + (r2 - r1) * f),
+                               int(g1 + (g2 - g1) * f),
+                               int(b1 + (b2 - b1) * f)))
+    return out
+
+
+# сколько разделов максимум показывается
+_MAX_SECTIONS = 6
+
+
+def palette_for_sections(n: int = _MAX_SECTIONS) -> list[int]:
+    """Палитра темы, приведённая ровно к n цветам, строго от самого
+    светлого к самому тёмному. Блоки и строка Palette используют её —
+    так порядок палитры и порядок блоков сверху-вниз совпадают."""
+    pal = get_theme_palette()
+    if not pal:
+        pal = sorted([196, 208, 215, 154, 51, 141, 99],
+                     key=_lum, reverse=True)
+    return _resample(pal, n)
+
+
 # ============================================================ библиотека анимаций
 #
 # Каждый блок инфоблока получает свою анимацию. Набор сдвигается (ротация):
@@ -679,26 +756,23 @@ def theme_name() -> str:
 
 
 def theme_family(si: int) -> list[int]:
-    """Семейство блока, построенное из цветов ТЕМЫ.
-    Каждому разделу — своя гамма темы (red→accent→cyan→...), с запасом
-    оттенков для градиента и дыхания."""
-    c = theme_colors()
-    # тема → акценты палитры; fallback на стандартные семейства
-    fams = [
-        [c.get("red", 167), c.get("bright_red", 203),
-         c.get("orange", 173), c.get("brown", 95), 88, 52],
-        [c.get("orange", 209), c.get("yellow", 215),
-         c.get("bright_yellow", 221), c.get("bright_orange", 208), 130, 94],
-        [c.get("blue", 69), c.get("bright_blue", 75),
-         c.get("accent", 69), 63, 33, 27],
-        [c.get("cyan", 80), c.get("bright_cyan", 87),
-         c.get("teal", 44), 38, 37, 30],
-        [c.get("magenta", 141), c.get("bright_magenta", 177),
-         c.get("purple", 135), 129, 93, 54],
-        [c.get("green", 77), c.get("bright_green", 120),
-         c.get("lime", 114), 71, 65, 23],
+    """Семейство блока: один цвет палитры темы + его оттенки.
+
+    Палитра (palette_for_sections) отсортирована от самого светлого к
+    самому тёмному. Каждый раздел получает СВОЙ цвет этой палитры (в том
+    же порядке, сверху-вниз), а внутри блока — градиент именно этого
+    тона: оттенки ярче и темнее. Так рамка, заголовок и строки блока
+    всегда одного тона, а блоки идут в порядке палитры."""
+    pal = palette_for_sections(_MAX_SECTIONS)
+    base = pal[si % len(pal)]
+    return [
+        shade_rgb(base, 1.30),      # ярче — заголовок
+        shade_rgb(base, 1.12),      # светлый акцент
+        base,                        # базовый тон блока
+        shade_rgb(base, 0.82),       # чуть глубже
+        shade_rgb(base, 0.62),       # глубокий
+        shade_rgb(base, 0.42),       # самый тёмный — низ блока
     ]
-    return fams[si % len(fams)]
 
 
 def theme_ui(key: str, fallback: int) -> int:
@@ -728,62 +802,54 @@ def family_color(si: int, row_i: int, n_rows: int, frame: int) -> int:
 # строки и участвует в анимациях наравне с текстом.
 
 KEY_ICONS = {
-    "OS": "",
-    "Host": "",
-    "Kernel": "",
-    "Uptime": "",
-    "Board": "",
-    "BIOS": "",
-    "Locale": "",
-    "Init": "",
-    "Arch": "",
-    "Timezone": "",
-    "CPU": "",
-    "Governor": "",
-    "GPU": "",
-    "iGPU": "",
-    "Driver": "",
-    "VRAM": "",
-    "GPU Use": "",
-    "CPU Temp": "",
-    "GPU Temp": "",
-    "Display": "",
-    "DE": "",
-    "Terminal": "",
-    "Shell": "",
-    "Launched": "",
-    "Memory": "",
-    "Swap": "",
-    "Disk /": "",
-    "Disk /home": "",
-    "Battery": "",
-    "Health": "",
-    "Packages": "",
-    "Load": "",
-    "Processes": "",
-    "Iface": "",
-    "WiFi": "",
-    "VPN": "",
-    "Note": "",
-    "WAN IP": "",
-    "Speed": "",
-    "GTK": "",
-    "Icons": "",
-    "Font": "",
-    "Cursor": "",
-    "Theme": "",
-    "Palette": "",
-    "OS ID": "",
-    "Version": "",
-    "Build": "",
-    "Timezone": "",
-    "VRAM": "",
-    "GPU Use": "",
-    "WiFi": "",
-    "Health": "",
-    "Theme": "",
-    "Palette": "",
-
+    "OS": "\uf303",
+    "Host": "\uf015",
+    "Kernel": "\uf109",
+    "Uptime": "\uf017",
+    "Board": "\uf2db",
+    "BIOS": "\uf013",
+    "Locale": "\uf0ac",
+    "Init": "\uf0e7",
+    "Arch": "\uf085",
+    "Timezone": "\uf017",
+    "CPU": "\uf4bc",
+    "Governor": "\uf0e7",
+    "GPU": "\uf26c",
+    "iGPU": "\uf03e",
+    "Driver": "\uf0ad",
+    "VRAM": "\uf538",
+    "GPU Use": "\uf080",
+    "CPU Temp": "\uf2c9",
+    "GPU Temp": "\uf2cb",
+    "Display": "\uf108",
+    "DE": "\uf2d0",
+    "Terminal": "\uf120",
+    "Shell": "\uf489",
+    "Launched": "\uf04b",
+    "Memory": "\uf538",
+    "Swap": "\uf0a0",
+    "Disk /": "\uf0a0",
+    "Disk /home": "\uf015",
+    "Battery": "\uf240",
+    "Health": "\uf21e",
+    "Packages": "\uf1c0",
+    "Load": "\uf201",
+    "Processes": "\uf0e0",
+    "Iface": "\uf0ac",
+    "WiFi": "\uf1eb",
+    "VPN": "\uf084",
+    "Note": "\uf05a",
+    "WAN IP": "\uf0c0",
+    "Speed": "\uf0e4",
+    "GTK": "\uf1fc",
+    "Icons": "\uf03e",
+    "Font": "\uf031",
+    "Cursor": "\uf245",
+    "Theme": "\uf03e",
+    "Palette": "\uf53f",
+    "OS ID": "\uf13a",
+    "Version": "\uf02c",
+    "Build": "\uf1b3",
 }
 
 
@@ -1869,16 +1935,30 @@ def get_theme() -> dict[str, str]:
     return theme
 
 
+def _lum(code: int) -> float:
+    """Яркость 256-цветного кода (грубо, для сортировки)."""
+    if 16 <= code < 232:
+        ci = code - 16
+        r, g, b = _CUBE[ci // 36], _CUBE[(ci // 6) % 6], _CUBE[ci % 6]
+    elif 232 <= code < 256:
+        return (code - 232) * 10
+    else:
+        return code
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
 def get_theme_palette() -> list[int] | None:
-    """Образец палитры активной темы: список 256-кодов ключевых акцентов."""
+    """Образец палитры активной темы: ключевые акценты,
+    отсортированные от самого СВЕТЛОГО к самому ТЁМНОМУ."""
     c = theme_colors()
     if not c:
         return None
     out = []
     for key in ("red", "orange", "yellow", "green", "cyan",
                 "blue", "magenta", "accent"):
-        if key in c:
+        if key in c and c[key] not in out:
             out.append(c[key])
+    out.sort(key=_lum, reverse=True)      # светлый → тёмный
     return out or None
 
 
@@ -2459,8 +2539,9 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
         theme_items.append(("Font", theme["font"], None))
     if theme.get("cursor"):
         theme_items.append(("Cursor", theme["cursor"], None))
-    # образец палитры темы — цветными квадратиками (спец-значение: список цветов)
-    palette = get_theme_palette()
+    # образец палитры темы — цветными квадратиками (спец-значение: список цветов).
+    # Порядок тот же, что и у блоков: от самого светлого к самому тёмному.
+    palette = palette_for_sections(_MAX_SECTIONS)
     if palette:
         theme_items.append(("Palette", palette, None))
     if theme_items:
