@@ -123,6 +123,9 @@ flamfetch --speed          # + быстрый спидтест (~2-8 сек)
 flamfetch --ping           # + пинг до 1.1.1.1
 flamfetch --clock          # + текущее время
 flamfetch --weather        # + погода из wttr.in
+flamfetch --update-check   # проверить обновление (раз в сутки)
+flamfetch --update         # обновиться до последней версии
+flamfetch --no-update-check # отключить автопроверку
 flamfetch --banner HELLO   # свой текст в блочном баннере
 flamfetch --no-banner      # без блочного баннера (только slant-лого)
 flamfetch --palette ice    # принудительная палитра (см. ниже)
@@ -148,6 +151,28 @@ flamfetch --help           # помощь
 | `candy` | конфетные розово-сиреневые |
 
 `--theme-swap` перебирает их по кругу (имя текущей — в stderr).
+
+### Обновления
+
+FlamFetch **сам проверяет обновления раз в сутки** (по тегам GitHub)
+и показывает строчку `Update` в блоке ◈ Сборка, когда вышла новая версия:
+
+```
+·  └─ FlamFetch    1.9.2
+·  └─ Update       ↑ 1.9.3 — flamfetch --update
+```
+
+Ручное управление:
+
+```bash
+flamfetch --update-check    # проверить сейчас (игнорируя суточный кэш)
+flamfetch --update          # обновиться до последней версии
+flamfetch --no-update-check # отключить автопроверку (или no_update_check = true в конфиге)
+```
+
+Обновление идёт **тем же способом, каким стоял фетч**:
+pacman → `pacman -Sy`, Scoop → `scoop update`, Winget → `winget upgrade`,
+ручная установка → перезапись `flamfetch.py` из master.
 
 ### Управление в --animate (клавиатура)
 

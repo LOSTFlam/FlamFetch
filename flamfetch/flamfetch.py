@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.2
+Версия: 1.9.3
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.2"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.3"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -169,6 +169,8 @@ RU = {
     "OS ID": "ID ОС",
     "Version": "Версия",
     "Build": "Сборка",
+    "FlamFetch": "FlamFetch",
+    "Update": "Обновление",
     # прочее
     "unavailable": "недоступен",
     "yes": "да",
@@ -947,6 +949,8 @@ KEY_ICONS = {
     "OS ID": "\uf13a",
     "Version": "\uf02c",
     "Build": "\uf1b3",
+    "FlamFetch": "\uf06d",
+    "Update": "\uf0e7",
 }
 
 
@@ -2754,11 +2758,17 @@ def build_sections(with_speed: bool = False, with_ping: bool = False,
 
     # ---------- ◈ Сборка ----------
     binfo = get_build_info()
-    sections.append(("◈ Build", [
+    build_items = [
         ("OS ID", binfo["id"], None),
         ("Version", binfo["version"], None),
         ("Build", binfo["build_id"], None),
-    ]))
+    ]
+    # версия фетча + уведомление об обновлении (проверка раз в сутки)
+    cur, avail = get_update_info()
+    build_items.append(("FlamFetch", VERSION, None))
+    if avail:
+        build_items.append(("Update", f"↑ {avail} — flamfetch --update", None))
+    sections.append(("◈ Build", build_items))
 
     return sections
 
@@ -2852,6 +2862,183 @@ def get_clock() -> str:
     """Текущее время — для --clock и живых часов в анимации."""
     import datetime
     return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+# ============================================================ обновления
+#
+# Автопроверка обновлений раз в сутки: --update-check, --update,
+# --no-update-check. Проверка — по тегам GitHub API (или install.sh);
+# установка — тем же способом, каким стоял фетч (pacman → pacman,
+# ~/.local/bin → перезапись файла, Scoop/Winget → их апдейтеры).
+
+REPO_OWNER = "LOSTFlam"
+REPO_NAME = "FlamFetch"
+_UPDATE_CHECK_ENABLED = True
+UPDATE_CACHE = HOME / ".cache" / "flamfetch" / "last-check" if not IS_WINDOWS \
+    else Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "flamfetch" / "last-check"
+
+
+def _parse_version(v: str) -> tuple:
+    """'1.9.2' → (1, 9, 2) для сравнения."""
+    v = v.lstrip("v").split("-")[0]
+    parts = []
+    for p in v.split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def get_latest_version() -> str | None:
+    """Последняя версия на GitHub (по тегам или install.sh)."""
+    # 1. GitHub API — теги
+    out = _run(["curl", "-s", "--max-time", "5",
+                f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/tags"])
+    if out and "{" in out:
+        import re
+        m = re.search(r'"name":\s*"v?([\d.]+)"', out)
+        if m:
+            return m.group(1)
+    # 2. Fallback: VERSION= из install.sh на master
+    out = _run(["curl", "-s", "--max-time", "5",
+                f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/master/install.sh"])
+    if out:
+        import re
+        m = re.search(r'VERSION="([\d.]+)"', out)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _should_check(force: bool = False) -> bool:
+    """Проверять ли сейчас: не чаще раза в сутки (кроме force)."""
+    if force:
+        return True
+    try:
+        if UPDATE_CACHE.exists():
+            import time as _t
+            age = _t.time() - UPDATE_CACHE.stat().st_mtime
+            if age < 86400:      # сутки
+                return False
+    except Exception:
+        pass
+    return True
+
+
+def _mark_checked() -> None:
+    try:
+        UPDATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        UPDATE_CACHE.touch()
+    except Exception:
+        pass
+
+
+def get_update_info(force: bool = False) -> tuple[str, str | None]:
+    """(текущая версия, доступная или None). Пустая доступная = нет связи,
+    уже последняя или проверка отключена."""
+    if not _UPDATE_CHECK_ENABLED:
+        return VERSION, None
+    if not _should_check(force):
+        return VERSION, None
+    _mark_checked()
+    latest = get_latest_version()
+    if latest and _parse_version(latest) > _parse_version(VERSION):
+        return VERSION, latest
+    return VERSION, None
+
+
+def get_install_method() -> str:
+    """Как установлен фетч: pacman / local / scoop / winget / unknown."""
+    # pacman — пакет знает систему
+    if not IS_WINDOWS and shutil.which("pacman"):
+        out = _run(["pacman", "-Q", "flamfetch"])
+        if out:
+            return "pacman"
+    # Scoop/Winget
+    if IS_WINDOWS:
+        out = _run(["scoop", "list", "flamfetch"])
+        if out and "flamfetch" in out.lower():
+            return "scoop"
+        out = _run(["winget", "list", "--id", "LOSTFlam.FlamFetch"])
+        if out and "FlamFetch" in out:
+            return "winget"
+    # ~/.local/bin — ручная/скриптовая установка
+    local_bin = HOME / ".local" / "bin"
+    try:
+        target = (local_bin / "flamfetch").resolve()
+        if target.exists() and str(HOME) in str(target):
+            return "local"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def do_update() -> bool:
+    """Обновляет фетч способом, соответствующим установке.
+    Возвращает True при успехе."""
+    latest = get_latest_version()
+    if not latest:
+        print("✗ не удалось связаться с GitHub", file=sys.stderr)
+        return False
+    if _parse_version(latest) <= _parse_version(VERSION):
+        print(f"✓ у вас уже последняя версия {VERSION}")
+        return True
+
+    method = get_install_method()
+    print(f"обновляю {VERSION} → {latest} (способ: {method})...")
+
+    if method == "pacman":
+        out = _run(["sudo", "pacman", "-Sy", "flamfetch"])
+        ok = out is not None and "ошибка" not in (out or "").lower()
+        if not ok:
+            # без sudo может не сработать — скажем пользователю
+            print("✗ pacman не смог обновиться. Выполните вручную:")
+            print("    sudo pacman -Sy flamfetch")
+            return False
+        print(f"✓ обновлено до {latest} через pacman")
+        return True
+
+    if method == "scoop":
+        out = _run(["scoop", "update", "flamfetch"])
+        if out is not None:
+            print(f"✓ обновлено до {latest} через scoop")
+            return True
+        print("✗ scoop update не сработал — попробуйте: scoop update flamfetch")
+        return False
+
+    if method == "winget":
+        out = _run(["winget", "upgrade", "--id", "LOSTFlam.FlamFetch"])
+        if out is not None:
+            print(f"✓ обновлено до {latest} через winget")
+            return True
+        print("✗ winget upgrade не сработал")
+        return False
+
+    # local / unknown: перезаписываем файл скрипта напрямую
+    url = (f"https://raw.githubusercontent.com/{REPO_OWNER}/"
+           f"{REPO_NAME}/master/flamfetch/flamfetch.py")
+    targets = []
+    script = Path(__file__).resolve()
+    share = HOME / ".local" / "share" / "flamfetch" / "flamfetch.py"
+    for t in (share, script):
+        if t.exists() and t not in targets:
+            targets.append(t)
+    ok = False
+    for t in targets:
+        try:
+            subprocess.run(["curl", "-sL", "--max-time", "20",
+                            "-o", str(t), url], check=True,
+                           capture_output=True)
+            ok = True
+        except Exception:
+            continue
+    if ok:
+        print(f"✓ flamfetch.py обновлён до {latest}")
+        return True
+    print("✗ не удалось обновиться. Скачайте вручную:")
+    print(f"    curl -o {share} {url}")
+    return False
 
 KEY_WIDTH = 12
 
@@ -3802,6 +3989,12 @@ def main():
                         help="show current time in System section")
     parser.add_argument("--weather", action="store_true",
                         help="show weather from wttr.in in Network")
+    parser.add_argument("--update-check", action="store_true",
+                        help="check for a new FlamFetch version (once a day)")
+    parser.add_argument("--update", action="store_true",
+                        help="update FlamFetch to the latest version")
+    parser.add_argument("--no-update-check", action="store_true",
+                        help="disable the once-a-day update check")
     parser.add_argument("--copy", action="store_true",
                         help="copy output to clipboard (xclip/wl-copy/pbcopy)")
     parser.add_argument("--json", action="store_true",
@@ -3838,6 +4031,22 @@ def main():
     if args.palette_hex:
         print_palette_hex()
         return
+
+    # --- обновления ---
+    if args.update:
+        sys.exit(0 if do_update() else 1)
+    if args.update_check:
+        cur, avail = get_update_info(force=True)
+        if avail:
+            print(f"доступна новая версия: {cur} → {avail}")
+            print("обновить:  flamfetch --update")
+        else:
+            print(f"у вас последняя версия: {cur}")
+        return
+    # конфиг no_update_check отключает автопроверку в фетче
+    if args.no_update_check or cfg.get("no_update_check", "").lower() == "true":
+        global _UPDATE_CHECK_ENABLED
+        _UPDATE_CHECK_ENABLED = False
 
     # баннер: конфиг banner_text, если флаг не задан
     global BANNER_TEXT, BANNER_ENABLED
