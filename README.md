@@ -130,8 +130,28 @@ flamfetch --help           # помощь
 - Python 3.8+
 - `pyfiglet` (`pip install pyfiglet`)
 - Опционально: `hyprctl` (разрешение, версия WM), `gsettings` (тема),
-  `nvidia-smi` (драйвер/температура GPU), `curl` (спидтест/гео),
-  `lspci` (GPU), `sensors` (температуры)
+  `nvidia-smi` (драйвер/температура/VRAM), `curl` (спидтест/гео),
+  `lspci` (GPU), `sensors` (температуры), `nmcli`/`iw` (Wi-Fi),
+  `timedatectl` (часовой пояс)
+
+### Установка на любой дистрибутив
+
+```bash
+# Универсальный установщик — сам определит пакетный менеджер
+# (pacman/apt/dnf/xbps) или поставит в ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.sh | bash
+
+# Arch/Omarchy — из репозитория (pacman.conf):
+#   [flamfetch]
+#   Server = https://lostflam.github.io/FlamFetch/repo/$arch
+sudo pacman -Sy flamfetch
+
+# Debian/Ubuntu (.deb), Fedora (.rpm) — см. INSTALL-DEBIAN.md / INSTALL-RPM.md
+```
+
+FlamFetch определяет пакеты через `pacman`, `dpkg`, `rpm` — и подстраивает
+цвета под тему **любой** ОС: Omarchy → GTK → конфиг терминала
+(alacritty/kitty/foot/ghostty) → Xresources → KDE → системная палитра.
 
 ---
 

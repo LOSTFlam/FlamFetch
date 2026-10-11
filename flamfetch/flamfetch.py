@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.6.0
+Версия: 1.7.0
 """
 
 import argparse
@@ -157,54 +157,75 @@ ANIM_LIBRARY = [
 
 ROTATE_FRAMES = 240      # ~20 сек при 0.08с/кадр — смена набора анимаций
 
+# ============================================================ единый такт
+#
+# Все пульсации (свечение, дыхание, волны, мерцание) идут от ОДНОГО
+# часового механизма: beat(frame, h) = frame × TEMPO × h. Гармоники
+# кратны базовой, поэтому всё движется в унисон — ничего не «скачет»
+# сама по себе. Кадр чуть спокойнее (0.09с), чтобы не рябило.
+
+FRAME_DELAY = 0.09       # сек между кадрами (было 0.08)
+TEMPO = 0.055            # базовая скорость пульсаций
+
+
+def beat(frame: int, h: float = 1.0) -> float:
+    """Фаза пульсации в едином темпе. h — гармоника: 0.5 (медленно),
+    1.0 (базовая), 2.0 (быстро) — всё кратно, поэтому синхронно."""
+    return frame * TEMPO * h
+
 
 # ============================================================ тема пользователя
 #
-# FlamFetch читает палитру активной темы (Omarchy/Aether colors.toml) и
-# строит все цвета на её основе: семейства блоков, рамки, значки. Палитра
-# «дышит» — сдвиг по оттенку внутри темы, но никогда не выходит за её
-# пределы, поэтому картинка всегда цельная.
+# FlamFetch работает на ЛЮБОМ дистрибутиве (Linux/macOS/BSD) и читает палитру
+# откуда может: Omarchy → GTK-тема → конфиг терминала → Xresources → KDE →
+# системная палитра xterm. Все цвета строятся на её основе: семейства блоков,
+# рамки, значки. Палитра «дышит» — сдвиг по оттенку внутри темы, но никогда
+# не выходит за её пределы, поэтому картинка всегда цельная.
 
-def _theme_dir() -> Path | None:
-    """Директория активной темы Omarchy."""
-    name_file = Path.home() / ".config" / "omarchy" / "theme.name"
-    if not name_file.exists():
-        return None
-    try:
-        name = name_file.read_text().strip()
-    except Exception:
-        return None
-    if not name:
-        return None
-    d = Path.home() / ".config" / "omarchy" / "themes" / name
-    return d if d.is_dir() else None
+HOME = Path.home()
+XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", str(HOME / ".config")))
+XDG_STATE = Path(os.environ.get("XDG_STATE_HOME", str(HOME / ".local" / "state")))
+
+# стандартная палитра xterm — последний fallback
+XTERM_FALLBACK = {
+    "red": 167, "green": 71, "yellow": 179, "blue": 68,
+    "magenta": 139, "cyan": 73, "foreground": 253, "background": 16,
+    "accent": 68,
+}
+
+
+def _hex_colors_from_text(text: str, keys: set[str] | None = None) -> dict[str, str]:
+    """Достаёт из текста пары «имя=#rrggbb» / «имя: #rrggbb» / «имя #rrggbb».
+    Универсально для TOML, INI, CSS, conf."""
+    out = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";", "//")):
+            continue
+        if "=" not in line and ":" not in line:
+            continue
+        for sep in ("=", ":"):
+            if sep in line:
+                k, v = line.split(sep, 1)
+                break
+        v = v.strip().strip('"').strip("'").strip(",").rstrip(";")
+        if v.startswith("#") and len(v) >= 7:
+            try:
+                int(v[1:3], 16), int(v[3:5], 16), int(v[5:7], 16)
+            except ValueError:
+                continue
+            name = k.strip().lower()
+            if keys is None or name in keys:
+                out[name] = v
+    return out
 
 
 def _parse_toml_colors(path: Path) -> dict[str, str]:
     """Мини-парсер colors.toml: ключ = "значение" (строки и #rrggbb)."""
-    out = {}
     try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            v = v.strip().strip('"').strip("'")
-            if v.startswith("#") and len(v) >= 7:
-                try:
-                    r = int(v[1:3], 16)
-                    g = int(v[3:5], 16)
-                    b = int(v[5:7], 16)
-                    out[k.strip()] = f"#{r:02x}{g:02x}{b:02x}"
-                except ValueError:
-                    continue
-            elif k.strip() == "mode":
-                out[k.strip()] = v          # "dark"/"light" — строка
+        return _hex_colors_from_text(path.read_text())
     except Exception:
-        pass
-    return out
+        return {}
 
 
 def hex_to_rgb(h: str) -> tuple[int, int, int]:
@@ -222,20 +243,288 @@ def rgb_to_256(r: int, g: int, b: int) -> int:
     return 16 + 36 * ri + 6 * gi + bi
 
 
-def load_theme() -> dict:
-    """Палитра активной темы: {'name', 'mode', 'colors': {имя: 256-код}}."""
-    theme = {"name": "?", "mode": "?", "colors": {}}
-    tdir = _theme_dir()
-    if tdir is None:
-        return theme
-    theme["name"] = tdir.name
-    raw = _parse_toml_colors(tdir / "colors.toml")
-    if "mode" in raw:
-        theme["mode"] = raw["mode"]
+def _parse_gtk_theme_name() -> str | None:
+    """Имя GTK-темы из settings.ini (gsettings как fallback)."""
+    for ini in (XDG_CONFIG / "gtk-3.0" / "settings.ini",
+                XDG_CONFIG / "gtk-4.0" / "settings.ini"):
+        if ini.exists():
+            try:
+                for line in ini.read_text().splitlines():
+                    if line.strip().lower().startswith("gtk-theme-name"):
+                        return line.split("=", 1)[1].strip()
+            except Exception:
+                pass
+    out = _run(["gsettings", "get", "org.gnome.desktop.interface", "gtk-theme"])
+    if out:
+        return out.strip().strip("'")
+    return None
+
+
+def _parse_terminal_theme() -> dict[str, str]:
+    """Цвета из конфигов терминалов: alacritty/kitty/foot/ghostty/xresources."""
+    found = {}
+    # --- alacritty (TOML) ---
+    for p in (XDG_CONFIG / "alacritty" / "alacritty.toml",
+              XDG_CONFIG / "alacritty" / "alacritty.yml",
+              HOME / ".alacritty.toml"):
+        if p.exists():
+            try:
+                found.update(_hex_colors_from_text(p.read_text()))
+            except Exception:
+                pass
+    # --- kitty ---
+    for p in (XDG_CONFIG / "kitty" / "kitty.conf", XDG_CONFIG / "kitty" / "theme.conf"):
+        if p.exists():
+            try:
+                for line in p.read_text().splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] in (
+                            "foreground", "background", "color1", "color2",
+                            "color3", "color4", "color5", "color6", "color7",
+                            "color8", "color9", "color10", "color11",
+                            "color12", "color13", "color14", "color15"):
+                        v = parts[1]
+                        if v.startswith("#"):
+                            found[parts[0].lower()] = v
+            except Exception:
+                pass
+    # --- foot ---
+    p = XDG_CONFIG / "foot" / "foot.ini"
+    if p.exists():
+        try:
+            found.update(_hex_colors_from_text(p.read_text()))
+        except Exception:
+            pass
+    # --- ghostty ---
+    p = XDG_CONFIG / "ghostty" / "config"
+    if p.exists():
+        try:
+            for line in p.read_text().splitlines():
+                line = line.strip()
+                if "=" in line and "palette" not in line:
+                    k, v = line.split("=", 1)
+                    v = v.strip()
+                    if v.startswith("#"):
+                        found[k.strip().lower()] = v
+                elif line.startswith("palette"):
+                    # palette = 0=#rrggbb;1=#rrggbb...
+                    body = line.split("=", 1)[1] if "=" in line else ""
+                    for item in body.split(";"):
+                        if "=" in item:
+                            idx, v = item.split("=", 1)
+                            v = v.strip()
+                            if v.startswith("#") and idx.strip().isdigit():
+                                found[f"color{idx.strip()}"] = v
+        except Exception:
+            pass
+    # --- Xresources ---
+    for p in (HOME / ".Xresources", HOME / ".Xdefaults"):
+        if p.exists():
+            try:
+                found.update(_hex_colors_from_text(p.read_text()))
+            except Exception:
+                pass
+    return found
+
+
+def _parse_kde_theme() -> dict[str, str]:
+    """Цвета из kdeglobals (KDE Plasma)."""
+    p = XDG_CONFIG / "kdeglobals"
+    if not p.exists():
+        return {}
+    try:
+        return _hex_colors_from_text(p.read_text())
+    except Exception:
+        return {}
+
+
+def _normalize_terminal_colors(raw: dict[str, str]) -> dict[str, str]:
+    """ANSI-номера терминалов → семантические имена (color1=red и т.д.)."""
+    ansi_map = {
+        "color1": "red", "color2": "green", "color3": "yellow",
+        "color4": "blue", "color5": "magenta", "color6": "cyan",
+        "color7": "foreground", "color8": "background",
+        "color9": "bright_red", "color10": "bright_green",
+        "color11": "bright_yellow", "color12": "bright_blue",
+        "color13": "bright_magenta", "color14": "bright_cyan",
+        "color15": "bright_foreground", "color0": "background",
+        "foreground": "foreground", "background": "background",
+        "accent": "accent",
+    }
+    out = {}
     for k, v in raw.items():
-        if v.startswith("#"):
-            r, g, b = hex_to_rgb(v)
-            theme["colors"][k] = rgb_to_256(r, g, b)
+        name = ansi_map.get(k.lower())
+        if name and name not in out:
+            out[name] = v
+    return out
+
+
+def _find_theme_sources() -> list[tuple[str, Path]]:
+    """Кандидаты colors.toml в порядке приоритета (Omarchy → прочее)."""
+    sources = []
+    # 1. живое состояние Omarchy
+    live = XDG_STATE / "omarchy" / "current" / "theme" / "colors.toml"
+    if live.exists():
+        sources.append(("Omarchy", live))
+    # 2. тема по имени из Omarchy
+    name_file = XDG_CONFIG / "omarchy" / "theme.name"
+    if name_file.exists():
+        try:
+            name = name_file.read_text().strip()
+            if name:
+                p = XDG_CONFIG / "omarchy" / "themes" / name / "colors.toml"
+                if p.exists():
+                    sources.append(("Omarchy", p))
+        except Exception:
+            pass
+    # 3. общие места colors.toml (pywal и подобные)
+    for p in (XDG_CONFIG / "colors.toml",
+              XDG_STATE / "colors.toml",
+              HOME / ".cache" / "wal" / "colors.toml",
+              HOME / ".config" / "wal" / "colors.toml"):
+        if p.exists():
+            sources.append(("custom", p))
+    return sources
+
+
+def load_theme() -> dict:
+    """Универсальная загрузка палитры: {'name', 'mode', 'colors', 'source'}.
+    Пробует источники по кругу, пока не наберутся основные цвета."""
+    theme = {"name": "?", "mode": "?", "colors": {}, "source": "?"}
+    c = theme["colors"]
+
+    # --- 1. colors.toml (Omarchy / pywal / custom) ---
+    for src_name, path in _find_theme_sources():
+        raw = _parse_toml_colors(path)
+        if raw:
+            theme["source"] = src_name
+            theme["name"] = path.parent.name
+            if "mode" in raw:
+                theme["mode"] = raw["mode"]
+            for k, v in raw.items():
+                if not v.startswith("#") or k == "mode":
+                    continue
+                r, g, b = hex_to_rgb(v)
+                c[k] = rgb_to_256(r, g, b)
+            # ANSI-цвета (color0-15) → семантические имена
+            ansi_to_semantic = {
+                "color1": "red", "color2": "green", "color3": "yellow",
+                "color4": "blue", "color5": "magenta", "color6": "cyan",
+                "color7": "foreground", "color8": "background",
+                "color9": "bright_red", "color10": "bright_green",
+                "color11": "bright_yellow", "color12": "bright_blue",
+                "color13": "bright_magenta", "color14": "bright_cyan",
+                "color15": "bright_foreground", "color0": "background",
+            }
+            for num, name in ansi_to_semantic.items():
+                if num in c and name not in c:
+                    c[name] = c[num]
+            if c:
+                break
+
+    # --- 2. GTK-тема: имя + цвета из CSS ---
+    if not c:
+        gtk_name = _parse_gtk_theme_name()
+        if gtk_name:
+            theme["source"] = "GTK"
+            theme["name"] = gtk_name
+            css = None
+            for base in (Path("/usr/share/themes"), HOME / ".themes",
+                         XDG_CONFIG / "themes"):
+                for rel in ("gtk-3.0/gtk.css", "gtk-3.0/gtk-dark.css",
+                            "gtk-4.0/gtk.css", "gtk-4.0/gtk-dark.css"):
+                    p = base / gtk_name / rel
+                    if p.exists():
+                        css = p
+                        break
+                if css:
+                    break
+            if css:
+                try:
+                    gtk_map = {
+                        "theme_bg_color": "background",
+                        "theme_fg_color": "foreground",
+                        "theme_selected_bg_color": "accent",
+                        "success_color": "green",
+                        "warning_color": "yellow",
+                        "error_color": "red",
+                        "theme_unfocused_selected_bg_color": "blue",
+                    }
+                    for line in css.read_text().splitlines():
+                        line = line.strip()
+                        if line.startswith("@define-color") and "#" in line:
+                            body = line[len("@define-color"):].strip()
+                            parts = body.split()
+                            if len(parts) >= 2 and parts[1].startswith("#"):
+                                name = gtk_map.get(parts[0].lower())
+                                if name and name not in c:
+                                    r, g, b = hex_to_rgb(parts[1])
+                                    c[name] = rgb_to_256(r, g, b)
+                except Exception:
+                    pass
+            # режим по имени темы
+            low = gtk_name.lower()
+            theme["mode"] = "light" if "light" in low else "dark"
+
+    # --- 3. терминалы ---
+    if not c or len(c) < 4:
+        term = _normalize_terminal_colors(_parse_terminal_theme())
+        if term:
+            if not c:
+                theme["source"] = "terminal"
+            for k, v in term.items():
+                if k not in c:
+                    r, g, b = hex_to_rgb(v)
+                    c[k] = rgb_to_256(r, g, b)
+
+    # --- 4. KDE ---
+    if not c or len(c) < 4:
+        kde = _normalize_terminal_colors(_parse_kde_theme())
+        if kde:
+            if not c:
+                theme["source"] = "KDE"
+            for k, v in kde.items():
+                if k not in c:
+                    r, g, b = hex_to_rgb(v)
+                    c[k] = rgb_to_256(r, g, b)
+
+    # --- 5. fallback: xterm ---
+    if not c:
+        theme["source"] = "xterm"
+        theme["name"] = "xterm"
+        c.update(XTERM_FALLBACK)
+
+    # accent, если не нашли
+    if "accent" not in c:
+        c["accent"] = c.get("blue") or c.get("red") or 68
+    # гарантируем базовые цвета из xterm, если тема их не дала
+    for k, v in XTERM_FALLBACK.items():
+        if k not in c:
+            c[k] = v
+    # режим: из темы, иначе по яркости фона (тёмный < 128)
+    if theme["mode"] == "?":
+        bg = theme["colors"].get("background", 16)
+        # 256-код → яркость (грубо: куб/серый)
+        if 16 <= bg < 232:
+            ci = bg - 16
+            r, g, b = _CUBE[ci // 36], _CUBE[(ci // 6) % 6], _CUBE[ci % 6]
+            lum = 0.299 * r + 0.587 * g + 0.114 * b
+        elif 232 <= bg < 256:
+            lum = (bg - 232) * 10
+        else:
+            lum = 0
+        theme["mode"] = "light" if lum > 128 else "dark"
+    # имя темы: человекочитаемо (обрезаем длинные хвосты)
+    name = theme["name"]
+    if len(name) > 30:
+        name = name[:27] + "..."
+    theme["name"] = name
+    # яркие варианты = обычные, если темa их не дала
+    for base, bright in (("red", "bright_red"), ("green", "bright_green"),
+                         ("yellow", "bright_yellow"), ("blue", "bright_blue"),
+                         ("magenta", "bright_magenta"), ("cyan", "bright_cyan")):
+        if bright not in c:
+            c[bright] = c[base]
     return theme
 
 
@@ -308,14 +597,17 @@ KEY_ICONS = {
     "BIOS": "",
     "Locale": "",
     "Init": "",
-    "Arch": "",
-    "CPU": "",
-    "Governor": "",
-    "GPU": "",
-    "iGPU": "",
-    "Driver": "",
-    "CPU Temp": "",
-    "GPU Temp": "",
+    "Arch": "",
+    "Timezone": "",
+    "CPU": "",
+    "Governor": "",
+    "GPU": "",
+    "iGPU": "",
+    "Driver": "",
+    "VRAM": "",
+    "GPU Use": "",
+    "CPU Temp": "",
+    "GPU Temp": "",
     "Display": "",
     "DE": "",
     "Terminal": "",
@@ -325,22 +617,34 @@ KEY_ICONS = {
     "Swap": "",
     "Disk /": "",
     "Disk /home": "",
-    "Battery": "",
-    "Packages": "",
-    "Load": "",
-    "Processes": "",
-    "Iface": "",
-    "VPN": "",
-    "Note": "",
-    "WAN IP": "",
-    "Speed": "",
-    "GTK": "",
-    "Icons": "",
-    "Font": "",
-    "Cursor": "",
-    "OS ID": "",
-    "Version": "",
-    "Build": "",
+    "Battery": "",
+    "Health": "",
+    "Packages": "",
+    "Load": "",
+    "Processes": "",
+    "Iface": "",
+    "WiFi": "",
+    "VPN": "",
+    "Note": "",
+    "WAN IP": "",
+    "Speed": "",
+    "GTK": "",
+    "Icons": "",
+    "Font": "",
+    "Cursor": "",
+    "Theme": "",
+    "Palette": "",
+    "OS ID": "",
+    "Version": "",
+    "Build": "",
+    "Timezone": "",
+    "VRAM": "",
+    "GPU Use": "",
+    "WiFi": "",
+    "Health": "",
+    "Theme": "",
+    "Palette": "",
+
 }
 
 
@@ -385,6 +689,23 @@ FRAME_BL, FRAME_BR = "╰", "╯"
 FRAME_H, FRAME_V = "─", "│"
 TREE_MID, TREE_END = "├─ ", "└─ "
 
+# узоры на разрывах рамки (там, где стенка не доходит до линии).
+# Меняются по кругу вместе со стилями рамки — как маленькие украшения.
+FRAME_BREAK_PATTERNS = [
+    ("·", "⁚"),        # точки
+    ("┄", "┆"),        # штрихи
+    ("∴", "∵"),        # треугольники
+    ("∙", "⁃"),        # ромбы/точки
+    ("╌", "╎"),        # волнистые
+    ("⁘", "⁙"),        # звёздочки
+    ("⁖", "⁗"),        # четвёрки
+]
+
+
+def break_pattern(frame: int) -> tuple[str, str]:
+    """(левый, правый) узор на разрывах рамки — общий, меняется по кругу."""
+    return FRAME_BREAK_PATTERNS[(frame // ROTATE_FRAMES) % len(FRAME_BREAK_PATTERNS)]
+
 FRAME_STYLES = ["solid", "march", "pulse", "corners", "wave", "sparkle",
                 "dashes", "glow"]
 
@@ -428,24 +749,24 @@ def frame_cell(style: str, frame: int, kind: str, pos: int,
 
     if style == "march":
         # бегущая яркость вдоль рамки
-        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.6 + frame * 0.12))
+        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.6 + beat(frame, 2.2)))
         return kind, shade_color(fam_dim, f), ""
 
     if style == "pulse":
         # вся рамка дышит разом
-        f = 0.50 + 0.50 * (0.5 + 0.5 * math.sin(frame * 0.07))
+        f = 0.50 + 0.50 * (0.5 + 0.5 * math.sin(beat(frame, 1.3)))
         return kind, shade_color(fam_dim, f), ""
 
     if style == "corners":
         # углы вспыхивают, рёбра спокойны
         if kind in (FRAME_TL, FRAME_TR, FRAME_BL, FRAME_BR):
-            f = 0.75 + 0.25 * math.sin(frame * 0.2)
+            f = 0.75 + 0.25 * math.sin(beat(frame, 3.6))
             return kind, shade_color(fam_bright, f), BOLD
         return kind, shade_color(fam_dim, 0.7), ""
 
     if style == "wave":
         # волна цвета едет по периметру
-        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.4 - frame * 0.1))
+        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.4 - beat(frame, 1.8)))
         return kind, shade_color(fam_bright if f > 0.8 else fam_dim, f), ""
 
     if style == "sparkle":
@@ -460,7 +781,7 @@ def frame_cell(style: str, frame: int, kind: str, pos: int,
 
     if style == "glow":
         # мягкое дыхательное свечение всей рамки
-        f = 0.65 + 0.35 * (0.5 + 0.5 * math.sin(frame * 0.05 + pos * 0.2))
+        f = 0.65 + 0.35 * (0.5 + 0.5 * math.sin(beat(frame, 0.9) + pos * 0.2))
         return kind, shade_color(fam_bright, f), ""
 
     return kind, fam_dim, ""
@@ -497,13 +818,13 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
 
     if anim == "glitch":
         # цифровой глитч: символы рассыпаются глитч-глифами
-        if rnd < 0.025 + 0.02 * math.sin(frame * 0.1 + phase):
+        if rnd < 0.025 + 0.02 * math.sin(beat(frame, 1.8) + phase):
             return random.choice(GLITCH_GLYPHS), random.choice(GLITCH_COLORS), ""
         return ch, col, ""
 
     if anim == "glow":
         # дыхательное свечение: яркость пульсирует со своим сдвигом
-        f = shade * (0.70 + 0.30 * (0.5 + 0.5 * math.sin(frame * 0.09 + phase)))
+        f = shade * (0.70 + 0.30 * (0.5 + 0.5 * math.sin(beat(frame, 1.6) + phase)))
         return ch, brighten_color(base_color, f), ""
 
     if anim == "typewriter":
@@ -549,12 +870,12 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
 
     if anim == "breathe":
         # строка дышит яркостью
-        f = shade * (0.50 + 0.50 * (0.5 + 0.5 * math.sin(frame * 0.05 + phase)))
+        f = shade * (0.50 + 0.50 * (0.5 + 0.5 * math.sin(beat(frame, 0.9) + phase)))
         return ch, shade_color(base_color, f), ""
 
     if anim == "fire":
         # огненный градиент по семейству блока + искры
-        t = (gi / 26.0 + frame * 0.03 + phase * 0.1) % 1.0
+        t = (gi / 26.0 + beat(frame, 0.55) + phase * 0.1) % 1.0
         if rnd < 0.015:
             return random.choice("·'`"), fam[0], ""
         idx = min(nf - 1, int(t * nf))
@@ -737,6 +1058,24 @@ def get_resolution() -> str | None:
             m = re.search(r"(\d{3,4}x\d{3,4})@(\d+)", line)
             if m:
                 return f"{m.group(1)}@{m.group(2)}Hz"
+    # sway
+    out = _run(["swaymsg", "-t", "get_outputs"])
+    if out:
+        import re
+        m = re.search(r'"width":(\d+),"height":(\d+),"refresh":(\d+)', out)
+        if m:
+            return f"{m.group(1)}x{m.group(2)}@{m.group(3)}Hz"
+    # xrandr (X11)
+    out = _run(["xrandr"])
+    if out:
+        import re
+        for line in out.splitlines():
+            m = re.search(r"\s+(\d{3,4}x\d{3,4})\s", line)
+            if m and ("*" in line or "+" in line):
+                hz = re.search(r"\*\+?\s+(\d+)\.\d+\*", line)
+                if hz:
+                    return f"{m.group(1)}@{hz.group(1)}Hz"
+                return m.group(1)
     return None
 
 
@@ -753,10 +1092,34 @@ def get_monitor_name() -> str | None:
 
 
 def get_de() -> str:
+    """Окружение рабочего стола: Wayland/X11 композиторы и классические DE."""
+    # Wayland-композиторы
     if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return "Hyprland (Wayland)"
+    if os.environ.get("SWAYSOCK"):
+        return "Sway (Wayland)"
     if os.environ.get("WAYLAND_DISPLAY"):
+        # попробуем угадать по процессам
+        for comp, name in (("niri", "Niri"), ("river", "River"),
+                           ("wayfire", "Wayfire"), ("labwc", "Labwc"),
+                           ("hyprland", "Hyprland"), ("sway", "Sway")):
+            if _read(f"/proc/{os.getppid()}/comm") == comp:
+                return f"{name} (Wayland)"
         return "Wayland"
+    # X11
+    if os.environ.get("DISPLAY"):
+        de = os.environ.get("XDG_CURRENT_DESKTOP", "")
+        if de:
+            return f"{de} (X11)"
+        for wm, name in (("i3", "i3"), ("bspwm", "bspwm"), ("openbox", "Openbox"),
+                         ("awesome", "Awesome"), ("dwm", "dwm"),
+                         ("xmonad", "xmonad"), ("qtile", "Qtile")):
+            try:
+                if Path(f"/proc/{os.getppid()}/comm").read_text().strip() == wm:
+                    return f"{name} (X11)"
+            except Exception:
+                pass
+        return "X11"
     return "TTY"
 
 
@@ -792,16 +1155,132 @@ def get_shell_version() -> str | None:
     return None
 
 
-def get_packages() -> str:
-    counts = []
-    for mgr, cmd in (
-        ("pacman", ["pacman", "-Q"]),
-        ("flatpak", ["flatpak", "list"]),
-    ):
-        out = _run(cmd)
+def get_gpu_memory() -> tuple[int, int] | None:
+    """(всего, использовано) VRAM в MiB — только NVIDIA."""
+    out = _run(["nvidia-smi", "--query-gpu=memory.total,memory.used",
+                "--format=csv,noheader,nounits"])
+    if out:
+        try:
+            parts = out.splitlines()[0].split(",")
+            return int(parts[0].strip()), int(parts[1].strip())
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def get_gpu_util() -> int | None:
+    """Утилизация GPU в % (NVIDIA)."""
+    out = _run(["nvidia-smi", "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits"])
+    if out:
+        try:
+            return int(out.splitlines()[0].strip())
+        except ValueError:
+            return None
+    return None
+
+
+def get_wifi_info() -> tuple[str | None, int | None]:
+    """(SSID, сигнал dBm) активного Wi-Fi, или (None, None)."""
+    ssid = None
+    signal = None
+    # nmcli — самый распространённый
+    out = _run(["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi"])
+    if out:
+        for line in out.splitlines():
+            parts = line.split(":")
+            if len(parts) >= 3 and parts[0] == "yes":
+                ssid = parts[1] or None
+                try:
+                    signal = int(parts[2])
+                except ValueError:
+                    pass
+                break
+    # iw как fallback
+    if ssid is None:
+        out = _run(["iw", "dev"])
         if out:
-            n = len(out.splitlines())
-            counts.append(f"{n} ({mgr})")
+            import re
+            m = re.search(r"ssid\s+(\S+)", out, re.I)
+            if m:
+                ssid = m.group(1)
+    if signal is None:
+        out = _run(["iwconfig"])
+        if out:
+            import re
+            m = re.search(r"Signal level[=:]?\s*(-?\d+)", out)
+            if m:
+                signal = int(m.group(1))
+    return ssid, signal
+
+
+def get_timezone() -> str | None:
+    out = _run(["timedatectl", "show", "-p", "Timezone", "--value"])
+    if out:
+        return out.strip()
+    tz = _read("/etc/timezone")
+    if tz:
+        return tz.strip()
+    return os.environ.get("TZ")
+
+
+def get_battery_health() -> float | None:
+    """Здоровье батареи в % (energy_full / energy_full_design)."""
+    bat = Path("/sys/class/power_supply")
+    for b in bat.glob("BAT*"):
+        full = _read(str(b / "energy_full"))
+        design = _read(str(b / "energy_full_design"))
+        if full and design:
+            try:
+                return 100 * int(full) / int(design)
+            except (ValueError, ZeroDivisionError):
+                return None
+    return None
+
+
+def get_cpu_threads() -> int:
+    try:
+        return os.cpu_count() or 0
+    except Exception:
+        return 0
+
+
+def get_packages() -> str:
+    """Пакеты: pacman / dpkg / rpm / apk / xbps — что найдётся."""
+    counts = []
+    # Arch
+    out = _run(["pacman", "-Q"])
+    if out:
+        counts.append(f"{len(out.splitlines())} (pacman)")
+    # Debian/Ubuntu
+    if not counts:
+        out = _run(["dpkg", "-l"])
+        if out:
+            n = sum(1 for l in out.splitlines()
+                    if len(l) > 2 and l[:2] in ("ii", "hi"))
+            if n:
+                counts.append(f"{n} (dpkg)")
+    # Fedora/RHEL/SUSE
+    if not counts:
+        out = _run(["rpm", "-qa"])
+        if out:
+            counts.append(f"{len(out.splitlines())} (rpm)")
+    # Void
+    if not counts:
+        out = _run(["xbps-query", "-l"])
+        if out:
+            counts.append(f"{len(out.splitlines())} (xbps)")
+    # Alpine
+    if not counts:
+        out = _run(["apk", "info"])
+        if out:
+            counts.append(f"{len(out.splitlines())} (apk)")
+    # flatpak — всегда показываем, если есть
+    out = _run(["flatpak", "list"])
+    if out:
+        n = len(out.splitlines())
+        if n:
+            counts.append(f"{n} (flatpak)")
     return ", ".join(counts) or "?"
 
 
@@ -1279,13 +1758,17 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
         sys_items.append(("Board", board, None))
     if bios:
         sys_items.append(("BIOS", bios, None))
+    tz = get_timezone()
+    if tz:
+        sys_items.append(("Timezone", tz, None))
     sys_items.append(("Locale", get_locale(), None))
     sys_items.append(("Init", get_init(), None))
     sys_items.append(("Arch", get_arch(), None))
 
     # ---------- ◈ Оборудование ----------
+    cpu = get_cpu()
     hw_items = [
-        ("CPU", get_cpu(), None),
+        ("CPU", cpu, None),
     ]
     if gov:
         hw_items.append(("Governor", gov, None))
@@ -1295,6 +1778,12 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
         hw_items.append(("iGPU", gpus[1], None))
     if gpu_drv:
         hw_items.append(("Driver", gpu_drv, None))
+    vram = get_gpu_memory()
+    if vram:
+        hw_items.append(("VRAM", f"{vram[1]}/{vram[0]} MiB", None))
+    util = get_gpu_util()
+    if util is not None:
+        hw_items.append(("GPU Use", f"{util}%", float(util)))
     if cpu_temp is not None:
         hw_items.append(("CPU Temp", f"{cpu_temp:.0f}°C", None))
     if gpu_temp is not None:
@@ -1323,7 +1812,10 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
     if bat:
         pct, status = bat
         icon_b = "⚡" if status == "Charging" else "🔋"
+        health = get_battery_health()
         res_items.append(("Battery", f"{pct}% {icon_b}", float(pct)))
+        if health is not None:
+            res_items.append(("Health", f"{health:.0f}%", health))
     pkgs = get_packages()
     if pkgs != "?":
         res_items.append(("Packages", pkgs, None))
@@ -1345,6 +1837,11 @@ def build_sections(with_speed: bool = False) -> list[tuple[str, list[tuple[str, 
             continue
         ip_short = ip.split("/")[0] if ip else "-"
         net_items.append(("Iface", f"{name} ({ip_short})", None))
+    # Wi-Fi: SSID + сила сигнала
+    ssid, signal = get_wifi_info()
+    if ssid:
+        sig = f"{signal}%" if signal is not None else ""
+        net_items.append(("WiFi", f"{ssid}" + (f" ({sig})" if sig else ""), None))
     if vpns:
         vpn_name = vpns[0]
         if ext:
@@ -1441,14 +1938,13 @@ def _static_block_lines(blk, frame: int = 0) -> list[str]:
                 + visible_width(str(value)) \
                 + (11 if row.pct is not None else 0)
         # стенки-оконтовка: первая и последняя строки блока — без стенок,
-        # рамка «обнимает» блок, а не запирает его
+        # но на разрывах — узор
+        pl, pr = break_pattern(frame)
         if kv_i == 0 or is_last:
-            left = fg(fam_dim) + " " + RESET
+            left = fg(fam_dim) + pl + RESET
+            right = fg(fam_dim) + pr + RESET
         else:
             left = fg(fam_dim) + FRAME_V + " " + RESET
-        if kv_i == 0 or is_last:
-            right = fg(fam_dim) + " " + RESET
-        else:
             right = fg(fam_dim) + " " + FRAME_V + RESET
         vis = blk.width - 2 - body_vis
         fill = " " * max(0, vis)
@@ -1740,7 +2236,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                 y = flam_rows[ri]
                 if y >= rows:
                     break
-                shimmer = int(1.6 * math.sin(frame * 0.09 + ri * 0.8))
+                shimmer = int(1.6 * math.sin(beat(frame, 1.6) + ri * 0.8))
                 for ci, ch in enumerate(line):
                     if ch == " ":
                         continue
@@ -1750,7 +2246,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     canvas[y][x] = ch
                     wave = ri / max(len(flam) - 1, 1)
                     flicker = random.uniform(-0.15, 0.15)
-                    pulse = 0.3 * math.sin(frame * 0.25 + ri)
+                    pulse = 0.3 * math.sin(beat(frame, 3.6) + ri)
                     t = max(0.0, min(1.0, wave + 0.4 + pulse + flicker))
                     ccolor[y][x] = fire_color(t)
                     for dy in (-1, 0, 1):
@@ -1856,7 +2352,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                 for i, ch in enumerate(sub):
                     if sx + i < cols:
                         canvas[sy][sx + i] = ch
-                        wave = (i / max(len(sub) - 1, 1) + frame * 0.04) % 1.0
+                        wave = (i / max(len(sub) - 1, 1) + beat(frame, 0.75)) % 1.0
                         ccolor[sy][sx + i] = fire_color(wave)
                         for dy in (-1, 0, 1):
                             for dx in (-1, 0, 1):
@@ -1883,7 +2379,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
 
             # ===== инфоблок: блоки с рамками, дерево, семейства цветов =====
             fstyle = frame_style(frame)
-            scan_y = 2 + ((frame * 0.55) % (scan_span + 10))
+            scan_y = 2 + ((beat(frame, 10.0)) % (scan_span + 10))
 
             # случайные цифровые глитчи на значениях (по блокам и строкам)
             if frame % 61 == 0 and blocks:
@@ -1965,9 +2461,17 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     conn = TREE_END if is_last else TREE_MID
                     icon = key_icon(row.key)
 
-                    # стенки-оконтовка: первая и последняя строки — без стенок
+                    # стенки-оконтовка: первая и последняя строки — без стенок,
+                    # на разрывах — узор
+                    pl, pr = break_pattern(frame)
                     if kv_i == 0 or is_last:
-                        pass   # рамка «обнимает» блок, не запирая
+                        if fx < cols:
+                            canvas[y][fx] = pl
+                            ccolor[y][fx] = shade_color(fam_dim, 0.9)
+                        rx = fx + fw - 1
+                        if rx < cols:
+                            canvas[y][rx] = pr
+                            ccolor[y][rx] = shade_color(fam_dim, 0.9)
                     else:
                         if fx < cols:
                             canvas[y][fx] = frame_vchar(fstyle, frame, y)
@@ -2015,7 +2519,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                     seq = [(icon + " ", base, "", "icon"),
                            (conn, shade_color(fam_dim, 0.8), "", "conn"),
                            (row.key.ljust(KEY_WIDTH), key_base,
-                            BOLD if math.sin(frame * 0.12 + phase) > -0.3 else "",
+                            BOLD if math.sin(beat(frame, 2.2) + phase) > -0.3 else "",
                             "key"),
                            (" ", COLOR_DIM, "", "gap"),
                            (row.value, COLOR_VALUE, "", "value")]
@@ -2129,7 +2633,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False) -> None:
                 sys.stdout.flush()
             except (BrokenPipeError, BlockingIOError, OSError):
                 pass
-            time.sleep(0.08)
+            time.sleep(FRAME_DELAY)
 
     except KeyboardInterrupt:
         pass
@@ -2157,7 +2661,7 @@ def main():
                         help="только системная информация, без логотипа")
     parser.add_argument("--speed", "-s", action="store_true",
                         help="сделать быстрый спидтест (добавляет ~2-8 сек)")
-    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.6.0")
+    parser.add_argument("--version", "-V", action="version", version="flamfetch 1.7.0")
     args = parser.parse_args()
 
     if args.no_logo:
