@@ -1,4 +1,4 @@
-# FlamFetch — one-click Windows installer
+# FlamFetch - one-click Windows installer
 #
 # Run in PowerShell:
 #   irm https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/install.ps1 | iex
@@ -61,7 +61,7 @@ if (-not $PM) {
             if (Get-Command winget -ErrorAction SilentlyContinue) {
                 $PM = "winget"; Write-Ok "winget is ready"
             } else {
-                Write-Warn "winget still not found — continuing without it"
+                Write-Warn "winget still not found - continuing without it"
             }
         } catch {
             Write-Warn "could not open the Store: $_"
