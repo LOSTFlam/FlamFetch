@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.6
+Версия: 1.9.7
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.6"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.7"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -2902,16 +2902,29 @@ def print_palette_hex() -> None:
 
 
 def get_weather() -> str | None:
-    """Погода из wttr.in (компактный формат). None если недоступно."""
+    """Погода из wttr.in (компактный формат). None если недоступно.
+    Кросс-платформенно: сперва curl, иначе urllib (если curl не стоит)."""
     out = _run(["curl", "-s", "--max-time", "4",
                 "https://wttr.in/?format=%c%t+%C+%h"])
     if out and "%" in out and "Unknown" not in out:
         return " ".join(out.split())
+    # фолбэк без curl (чистый Python, всегда есть)
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://wttr.in/?format=%c%t+%C+%h",
+            headers={"User-Agent": "curl/8"})
+        with urllib.request.urlopen(req, timeout=4) as r:
+            out = r.read().decode("utf-8", errors="replace").strip()
+        if out and "%" in out and "Unknown" not in out:
+            return " ".join(out.split())
+    except Exception:
+        pass
     return None
 
 
 def get_clock() -> str:
-    """Текущее время — для --clock и живых часов в анимации."""
+    """Текущее время — для блока ◈ Live и живых часов в анимации."""
     import datetime
     return datetime.datetime.now().strftime("%H:%M:%S")
 
