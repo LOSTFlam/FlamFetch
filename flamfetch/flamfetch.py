@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.8
+Версия: 1.9.9
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.8"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.9"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -442,22 +442,29 @@ ANIM_LIBRARY = [
     "rainbow",       # радужный бегун по всей строке
 ]
 
-ROTATE_FRAMES = 240      # ~20 сек при 0.08с/кадр — смена набора анимаций
+ROTATE_FRAMES = 240      # ~21 сек при 0.09с/кадр — смена набора анимаций
+                         # кратно MASTER_PERIOD (240 = 120×2) — в такт
 
 # ============================================================ единый такт
 #
 # Все пульсации (свечение, дыхание, волны, мерцание) идут от ОДНОГО
-# часового механизма: beat(frame, h) = frame × TEMPO × h. Гармоники
-# кратны базовой, поэтому всё движется в унисон — ничего не «скачет»
-# сама по себе. Кадр чуть спокойнее (0.09с), чтобы не рябило.
+# часового механизма: beat(frame, h) = frame × TEMPO × h. TEMPO подобран
+# так, что базовый период = РОВНО MASTER_PERIOD кадров (2π/TEMPO), а все
+# гармоники h кратны 1.0 (0.25/0.5/1/2/3/4) — значит ВСЕ пульсации
+# возвращаются в исходную фазу одновременно, ничего не «плавает»
+# относительно друг друга. Циклические сдвиги (палитра, стили рамок,
+# узоры) тоже кратны MASTER_PERIOD — унисон гарантирован.
+# Кадр спокойный (0.09с), чтобы не рябило.
 
-FRAME_DELAY = 0.09       # сек между кадрами (было 0.08)
-TEMPO = 0.055            # базовая скорость пульсаций
+FRAME_DELAY = 0.09       # сек между кадрами
+MASTER_PERIOD = 120      # кадров в макро-цикле — все такты кратны ему
+TEMPO = 2 * math.pi / MASTER_PERIOD   # базовая частота: период = 120 кадров
 
 
 def beat(frame: int, h: float = 1.0) -> float:
-    """Фаза пульсации в едином темпе. h — гармоника: 0.5 (медленно),
-    1.0 (базовая), 2.0 (быстро) — всё кратно, поэтому синхронно."""
+    """Фаза пульсации в едином темпе. h — гармоника: 0.25, 0.5, 1.0,
+    2.0, 3.0, 4.0 (ТОЛЬКО кратные базе!) — всё бьётся в унисон,
+    период каждой кратен MASTER_PERIOD."""
     return frame * TEMPO * h
 
 
@@ -883,7 +890,8 @@ def theme_ui(key: str, fallback: int) -> int:
 # Цвет строки: семейство блока (из темы) + градиент по позиции
 # (яркий сверху → темнее вниз) + дыхание палитры во времени.
 
-FAMILY_SHIFT_FRAMES = 90   # ~7 сек — палитра блока сдвигается на шаг
+FAMILY_SHIFT_FRAMES = 30   # ~2.7 сек — палитра блока сдвигается на шаг
+                            # кратно MASTER_PERIOD (120/30 = 4) — в такт
 
 
 def family_color(si: int, row_i: int, n_rows: int, frame: int) -> int:
@@ -1057,24 +1065,24 @@ def frame_cell(style: str, frame: int, kind: str, pos: int,
 
     if style == "march":
         # бегущая яркость вдоль рамки
-        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.6 + beat(frame, 2.2)))
+        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.6 + beat(frame, 2.0)))
         return kind, shade_color(fam_dim, f), ""
 
     if style == "pulse":
         # вся рамка дышит разом
-        f = 0.50 + 0.50 * (0.5 + 0.5 * math.sin(beat(frame, 1.3)))
+        f = 0.50 + 0.50 * (0.5 + 0.5 * math.sin(beat(frame, 1.0)))
         return kind, shade_color(fam_dim, f), ""
 
     if style == "corners":
         # углы вспыхивают, рёбра спокойны
         if kind in (FRAME_TL, FRAME_TR, FRAME_BL, FRAME_BR):
-            f = 0.75 + 0.25 * math.sin(beat(frame, 3.6))
+            f = 0.75 + 0.25 * math.sin(beat(frame, 4.0))
             return kind, shade_color(fam_bright, f), BOLD
         return kind, shade_color(fam_dim, 0.7), ""
 
     if style == "wave":
         # волна цвета едет по периметру
-        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.4 - beat(frame, 1.8)))
+        f = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(pos * 0.4 - beat(frame, 2.0)))
         return kind, shade_color(fam_bright if f > 0.8 else fam_dim, f), ""
 
     if style == "sparkle":
@@ -1089,7 +1097,7 @@ def frame_cell(style: str, frame: int, kind: str, pos: int,
 
     if style == "glow":
         # мягкое дыхательное свечение всей рамки
-        f = 0.65 + 0.35 * (0.5 + 0.5 * math.sin(beat(frame, 0.9) + pos * 0.2))
+        f = 0.65 + 0.35 * (0.5 + 0.5 * math.sin(beat(frame, 1.0) + pos * 0.2))
         return kind, shade_color(fam_bright, f), ""
 
     return kind, fam_dim, ""
@@ -1126,13 +1134,13 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
 
     if anim == "glitch":
         # цифровой глитч: символы рассыпаются глитч-глифами
-        if rnd < 0.025 + 0.02 * math.sin(beat(frame, 1.8) + phase):
+        if rnd < 0.025 + 0.02 * math.sin(beat(frame, 2.0) + phase):
             return random.choice(GLITCH_GLYPHS), random.choice(GLITCH_COLORS), ""
         return ch, col, ""
 
     if anim == "glow":
         # дыхательное свечение: яркость пульсирует со своим сдвигом
-        f = shade * (0.70 + 0.30 * (0.5 + 0.5 * math.sin(beat(frame, 1.6) + phase)))
+        f = shade * (0.70 + 0.30 * (0.5 + 0.5 * math.sin(beat(frame, 2.0) + phase)))
         return ch, brighten_color(base_color, f), ""
 
     if anim == "typewriter":
@@ -1160,7 +1168,9 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
 
     if anim == "scanline":
         # узкая полоса бежит по строке, подсвечивая символы
-        sx = int((frame * 1.6 + phase * 30) % 200)
+        # скорость кратна макро-тактту: 200 клеток / 2.0 гармоники —
+        # полоса возвращается в начало ровно через MASTER_PERIOD кадров
+        sx = int((beat(frame, 2.0) / (2 * math.pi) * 200 + phase * 30) % 200)
         if abs(gi - sx) < 1:
             return ch, 255, BOLD
         return ch, col, ""
@@ -1173,17 +1183,17 @@ def apply_anim(anim: str, ch: str, frame: int, phase: float, gi: int,
 
     if anim == "colorcycle":
         # цвет пункта медленно крутится по семейству блока
-        idx = (frame // 9) % nf
+        idx = (frame // 6) % nf          # 120/6 = 20 — кратно макро-тактту
         return ch, shade_color(fam[idx], shade), ""
 
     if anim == "breathe":
         # строка дышит яркостью
-        f = shade * (0.50 + 0.50 * (0.5 + 0.5 * math.sin(beat(frame, 0.9) + phase)))
+        f = shade * (0.50 + 0.50 * (0.5 + 0.5 * math.sin(beat(frame, 1.0) + phase)))
         return ch, shade_color(base_color, f), ""
 
     if anim == "fire":
         # огненный градиент по семейству блока + искры
-        t = (gi / 26.0 + beat(frame, 0.55) + phase * 0.1) % 1.0
+        t = (gi / 26.0 + beat(frame, 0.5) + phase * 0.1) % 1.0
         if rnd < 0.015:
             return random.choice("·'`"), fam[0], ""
         idx = min(nf - 1, int(t * nf))
@@ -3771,7 +3781,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                     ct = 0.30 + 0.65 * (1.0 - t)
                     pulse = 0.10 * math.sin(beat(frame, 2.0) + ci * 0.3 + ri)
                     # firewave: горизонтальная волна жары бежит по буквам
-                    wave = 0.5 + 0.5 * math.sin(ci * 0.45 - beat(frame, 2.5))
+                    wave = 0.5 + 0.5 * math.sin(ci * 0.45 - beat(frame, 3.0))
                     ccolor[y][x] = fire_color(max(0.0, min(1.0,
                                                     ct + pulse + 0.18 * wave)))
                     if random.random() < 0.02:      # редкие искры на буквах
@@ -3790,7 +3800,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                 y = flam_rows[ri]
                 if y >= rows:
                     break
-                shimmer = int(1.6 * math.sin(beat(frame, 1.6) + ri * 0.8))
+                shimmer = int(1.6 * math.sin(beat(frame, 2.0) + ri * 0.8))
                 for ci, ch in enumerate(line):
                     if ch == " ":
                         continue
@@ -3800,7 +3810,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                     canvas[y][x] = ch
                     wave = ri / max(len(flam) - 1, 1)
                     flicker = random.uniform(-0.15, 0.15)
-                    pulse = 0.3 * math.sin(beat(frame, 3.6) + ri)
+                    pulse = 0.3 * math.sin(beat(frame, 4.0) + ri)
                     t = max(0.0, min(1.0, wave + 0.4 + pulse + flicker))
                     ccolor[y][x] = fire_color(t)
                     for dy in (-1, 0, 1):
@@ -3906,7 +3916,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                 for i, ch in enumerate(sub):
                     if sx + i < cols:
                         canvas[sy][sx + i] = ch
-                        wave = (i / max(len(sub) - 1, 1) + beat(frame, 0.75)) % 1.0
+                        wave = (i / max(len(sub) - 1, 1) + beat(frame, 1.0)) % 1.0
                         ccolor[sy][sx + i] = fire_color(wave)
                         for dy in (-1, 0, 1):
                             for dx in (-1, 0, 1):
@@ -3933,10 +3943,11 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
 
             # ===== инфоблок: блоки с рамками, дерево, семейства цветов =====
             fstyle = frame_style(frame)
-            scan_y = 2 + ((beat(frame, 10.0)) % (scan_span + 10))
+            scan_y = 2 + ((beat(frame, 8.0)) % (scan_span + 10))
 
             # случайные цифровые глитчи на значениях (по блокам и строкам)
-            if frame % 61 == 0 and blocks:
+            if frame % 60 == 0 and blocks:     # глитч раз в 60 кадров
+                                              # (120/60 = 2) — в такт
                 bi = random.randrange(len(blocks))
                 if blocks[bi].rows:
                     ri = random.randrange(len(blocks[bi].rows))
@@ -4073,7 +4084,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                     seq = [(icon + " ", base, "", "icon"),
                            (conn, shade_color(fam_dim, 0.8), "", "conn"),
                            (_visible_pad(T(row.key), KEY_WIDTH), key_base,
-                            BOLD if math.sin(beat(frame, 2.2) + phase) > -0.3 else "",
+                            BOLD if math.sin(beat(frame, 2.0) + phase) > -0.3 else "",
                             "key"),
                            (" ", COLOR_DIM, "", "gap"),
                            (row.value, COLOR_VALUE, "", "value")]
