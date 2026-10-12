@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.7
+Версия: 1.9.8
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.7"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "1.9.8"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -3223,12 +3223,44 @@ def _static_block_lines(blk, frame: int = 0) -> list[str]:
 
 
 def render_info_static(sections, indent: str = "") -> None:
-    """Печать инфоблока (для --no-logo)."""
-    blocks = build_blocks(sections, rot=_rotation_offset())
+    """Печать инфоблока (для --no-logo) — в две колонки."""
+    # доступная ширина — по терминалу (чтобы правая колонка не сжалась)
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 200
+    avail_w = max(40, cols - len(indent) - 1)
+    blocks = build_blocks(sections, rot=_rotation_offset(),
+                          max_width=avail_w, two_col=True)
+    need_w = max((b.x_top + b.width for b in blocks), default=0)
+    if need_w > avail_w:
+        blocks = build_blocks(sections, rot=_rotation_offset(),
+                              max_width=avail_w, two_col=False)
+    left_lines = []
+    right_lines = []
     for blk in blocks:
-        for line in _static_block_lines(blk):
+        if blk.x_top == 0:
+            left_lines.extend(_static_block_lines(blk))
+            left_lines.append("")
+        else:
+            right_lines.extend(_static_block_lines(blk))
+            right_lines.append("")
+    if not right_lines:
+        for line in left_lines:
             print(indent + line)
-        print()
+        return
+    import re as _re
+    lw = max((len(_re.sub(r"\033\[[0-9;]*m", "", l)) for l in left_lines),
+             default=0)
+    total = max(len(left_lines), len(right_lines))
+    for i in range(total):
+        l = left_lines[i] if i < len(left_lines) else ""
+        r = right_lines[i] if i < len(right_lines) else ""
+        if not l and not r:
+            print()
+            continue
+        pad = " " * max(0, lw - len(_re.sub(r"\033\[[0-9;]*m", "", l)) + 3)
+        print(indent + l + pad + r)
 
 
 # ============================================================ рендер (статика)
@@ -3267,11 +3299,51 @@ def render_static(with_speed: bool = False, with_ping: bool = False) -> None:
     art_lines.append("")
     art_lines.append(fg(fire_color(0.3)) + " " * 6 + "by lostflam")
 
-    blocks = build_blocks(sections, rot=_rotation_offset())
-    info_lines = [""]
+    # доступная ширина под инфоблок = терминал - баннер/арт слева
+    try:
+        term_cols = os.get_terminal_size().columns
+    except OSError:
+        term_cols = 200
+    # баннер — самая широкая часть арта (арт + подписи уже известны)
+    art_w = max((max(len(l) for l in banner) if banner else 0),
+                max((len(l) for l in get_art()), default=0))
+    info_avail = max(40, term_cols - art_w - 5)
+    blocks = build_blocks(sections, rot=_rotation_offset(),
+                          max_width=info_avail, two_col=True)
+    # если две колонки не влезают — одна
+    need_w = max((b.x_top + b.width for b in blocks), default=0)
+    if need_w > info_avail:
+        blocks = build_blocks(sections, rot=_rotation_offset(),
+                              max_width=info_avail, two_col=False)
+    # раскладываем блоки в две колонки: левые (x_top=0) и правые
+    left_lines = []
+    right_lines = []
     for blk in blocks:
-        info_lines.extend(_static_block_lines(blk))
-        info_lines.append("")
+        if blk.x_top == 0:
+            left_lines.extend(_static_block_lines(blk))
+            left_lines.append("")
+        else:
+            right_lines.extend(_static_block_lines(blk))
+            right_lines.append("")
+    # если вторая колонка пуста — классический вид
+    if not right_lines:
+        info_lines = [""]
+        info_lines.extend(left_lines)
+    else:
+        info_lines = [""]
+        # ширина левой колонки — по самой длинной строке
+        import re as _re
+        lw = max((len(_re.sub(r"\033\[[0-9;]*m", "", l)) for l in left_lines),
+                 default=0)
+        total = max(len(left_lines), len(right_lines))
+        for i in range(total):
+            l = left_lines[i] if i < len(left_lines) else ""
+            r = right_lines[i] if i < len(right_lines) else ""
+            if not l and not r:
+                info_lines.append("")
+                continue
+            pad = " " * max(0, lw - len(_re.sub(r"\033\[[0-9;]*m", "", l)) + 3)
+            info_lines.append(l + pad + r)
 
     total = max(len(art_lines), len(info_lines))
 
@@ -3369,14 +3441,15 @@ class InfoRow:
 
 class Block:
     """Блок инфоблока: заголовок + строки + геометрия рамки."""
-    __slots__ = ("si", "title", "rows", "y_top", "height", "width",
+    __slots__ = ("si", "title", "rows", "y_top", "x_top", "height", "width",
                  "first_start", "last_start", "anim")
 
-    def __init__(self, si, title, rows, y_top, width, anim):
+    def __init__(self, si, title, rows, y_top, width, anim, x_top=0):
         self.si = si
         self.title = title
         self.rows = rows
         self.y_top = y_top          # строка верхней рамки
+        self.x_top = x_top          # сдвиг колонки вправо (0 — левая)
         self.height = len(rows) + 2 # рамка сверху + строки + рамка снизу
         self.width = width          # полная ширина рамки
         self.first_start = rows[0].start if rows else 0
@@ -3394,14 +3467,20 @@ def _row_content_width(key: str, value: str, pct: float | None) -> int:
 
 
 def build_blocks(sections, rot: int = 0, frame_base: int = 0,
-                 max_width: int = 100) -> list[Block]:
+                 max_width: int = 100, two_col: bool = False,
+                 col_gap: int = 3) -> list[Block]:
     """Собирает блоки с рамками. Каждый блок — своя анимация из библиотеки
     (с ротацией rot) и своё цветовое семейство; строки внутри блока —
-    та же анимация, но градиент темнее и сдвиг тайминга по позиции."""
+    та же анимация, но градиент темнее и сдвиг тайминга по позиции.
+
+    two_col=True — раскладка в ДВЕ колонки: блоки делятся по высоте
+    поровну, вторая колонка сдвинута вправо (x_top). Такой вывод
+    компактнее по вертикали — не нужен огромный терминал."""
     blocks = []
-    y = 2
     frame = 6 + frame_base
     n_anim = len(ANIM_LIBRARY)
+    # сначала строим ВСЕ блоки без позиционирования
+    prepared = []
     for si, (title, items) in enumerate(sections):
         real = [(k, v, p) for k, v, p in items if v is not None]
         if not real:
@@ -3426,8 +3505,43 @@ def build_blocks(sections, rot: int = 0, frame_base: int = 0,
                                 anim=block_anim, phase=phase, shade=shade,
                                 si=si, row_i=kv_i))
             frame += 1 if kv_i % 2 == 0 else 0
-        blocks.append(Block(si, title, rows, y, width, block_anim))
-        y += n_rows + 3          # рамка + строки + рамка + пропуск
+        prepared.append((si, title, rows, width, block_anim))
+
+    if two_col and len(prepared) > 1:
+        # делим блоки на две колонки по высоте — поровну
+        total_h = sum(len(r) + 3 for _, _, r, _, _ in prepared)
+        best, best_diff = 1, None
+        for i in range(1, len(prepared)):
+            h_left = sum(len(r) + 3 for _, _, r, _, _ in prepared[:i])
+            diff = abs(h_left - (total_h - h_left))
+            if best_diff is None or diff < best_diff:
+                best_diff, best = diff, i
+        left_p, right_p = prepared[:best], prepared[best:]
+        left_w = max((w for _, _, _, w, _ in left_p), default=0)
+        # вторая колонка не должна выезжать за экран. Если места мало —
+        # делим доступную ширину поровну между колонками (x_top+width
+        # <= max_width гарантированно).
+        right_cap = max_width - left_w - col_gap
+        if right_cap < 28:
+            # мало места: режем обе колонки до половинной ширины
+            half = max(28, (max_width - col_gap) // 2)
+            left_w = min(left_w, half)
+            right_cap = max(28, max_width - left_w - col_gap)
+        y = 2
+        for si, title, rows, width, anim in left_p:
+            blocks.append(Block(si, title, rows, y, min(width, left_w),
+                                anim, x_top=0))
+            y += len(rows) + 3
+        y = 2
+        for si, title, rows, width, anim in right_p:
+            blocks.append(Block(si, title, rows, y, min(width, right_cap),
+                                anim, x_top=left_w + col_gap))
+            y += len(rows) + 3
+    else:
+        y = 2
+        for si, title, rows, width, anim in prepared:
+            blocks.append(Block(si, title, rows, y, width, anim, x_top=0))
+            y += len(rows) + 3
     return blocks
 
 
@@ -3471,9 +3585,30 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
 
     art_w = max((max(len(l) for l in art) if art else 0), banner_w)
     info_col = art_w + 6
-    max_block_w = max(20, cols - info_col - 1)
-    blocks = build_blocks(sections, rot=rot, max_width=max_block_w)
+    avail_w = max(20, cols - info_col - 1)
+    # раскладка: две колонки дают вдвое меньшую высоту. Если в одну
+    # колонку терминал не влезает по ВЫСОТЕ — принудительно две колонки
+    # (ширина подожмётся обрезкой рамок), иначе по ширине.
     rot_frame = 0          # кадр, на котором пересобрали анимации
+    blocks_1col = build_blocks(sections, rot=rot, max_width=avail_w,
+                               two_col=False)
+    need_h_1col = max((b.y_top + b.height for b in blocks_1col),
+                      default=0) + 3
+    two_col = True
+    if need_h_1col <= rows:
+        # по высоте влезает — две колонки только если влезают по ширине
+        blocks_2col = build_blocks(sections, rot=rot, max_width=avail_w,
+                                   two_col=True)
+        need_w = max((b.x_top + b.width for b in blocks_2col), default=0)
+        if need_w <= avail_w:
+            blocks = blocks_2col
+        else:
+            two_col = False
+            blocks = blocks_1col
+    else:
+        # не влезает по высоте — две колонки принудительно
+        blocks = build_blocks(sections, rot=rot, max_width=avail_w,
+                              two_col=True)
 
     # блок ◈ Live: ищем его и строку Time для живого обновления времени
     live_blk = None
@@ -3495,8 +3630,12 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
 
     # сколько строк нужно под инфоблок (+ логотип/подписи слева)
     need_rows = max((b.y_top + b.height for b in blocks), default=0) + 3
-    if rows < need_rows and not intro:
-        print(f"Терминал мал: нужно ~{need_rows} строк, есть {rows}.")
+    # если не влезает — рендерим с клипом: блоки за экраном
+    # пропускаются (if fy + blk.height > rows: continue в цикле),
+    # большинство блоков остаются видны. Жёсткая ошибка — только
+    # при совсем крошечном терминале.
+    if rows < 15 and not intro:
+        print(f"Терминал слишком мал: нужно ~{need_rows} строк, есть {rows}.")
         return
 
     particles = []
@@ -3578,9 +3717,10 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                 banner_w = max(len(l) for l in banner) if banner else 0
                 art_w = max((max(len(l) for l in art) if art else 0), banner_w)
                 info_col = art_w + 6
-                max_block_w = max(20, cols - info_col - 1)
+                avail_w = max(20, cols - info_col - 1)
                 blocks = build_blocks(sections, rot=rot,
-                                      frame_base=frame, max_width=max_block_w)
+                                      frame_base=frame, max_width=avail_w,
+                                      two_col=two_col)
             elif k in ("+", "="):
                 speed_mul = max(0.25, speed_mul / 1.5)
             elif k == "-":
@@ -3589,7 +3729,8 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                 rot_frame = frame
                 rot = (rot + 1) % len(ANIM_LIBRARY)
                 blocks = build_blocks(sections, rot=rot,
-                                      frame_base=frame, max_width=max_block_w)
+                                      frame_base=frame, max_width=avail_w,
+                                      two_col=two_col)
             elif k == "p":
                 # смена палитры на ходу: по кругу именованных
                 new_pal = swap_palette()
@@ -3607,7 +3748,8 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
                 rot = (rot + 1) % len(ANIM_LIBRARY)
                 # мягко сдвигаем тайминги, чтобы каскад не «схлопывался»
                 blocks = build_blocks(sections, rot=rot, frame_base=frame,
-                                      max_width=max_block_w)
+                                      max_width=avail_w,
+                                      two_col=two_col)
             canvas = [[" "] * cols for _ in range(rows)]
             ccolor = [[0] * cols for _ in range(rows)]
             cattr = [[""] * cols for _ in range(rows)]
@@ -3803,7 +3945,7 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
             for blk in blocks:
                 si = blk.si
                 fam_dim, fam_bright = frame_colors(si, frame)
-                fx = info_col                            # левый край рамки
+                fx = info_col + blk.x_top            # левый край рамки
                 fy = blk.y_top
                 fw = blk.width
                 if fy + blk.height > rows:
@@ -4026,10 +4168,12 @@ def render_animated(intro: float = 0.0, with_speed: bool = False,
             # находим строку Time в блоке Live и перерисовываем значение
             if live_blk is not None and live_row is not None:
                 ly = live_blk.y_top + 1 + live_row
-                lx = info_col + live_val_x
+                lx = info_col + live_blk.x_top + live_val_x
                 if 0 <= ly < rows:
-                    # стираем старое значение (пробелами)
-                    for i in range(30):
+                    # стираем старое значение — но НЕ дальше правой
+                    # внутренней стенки блока (иначе сносим рамку)
+                    erase_w = max(0, live_blk.width - live_val_x - 2)
+                    for i in range(erase_w):
                         if lx + i < cols:
                             canvas[ly][lx + i] = " "
                             ccolor[ly][lx + i] = 0
