@@ -19,7 +19,7 @@ try {
 } catch { }
 $Repo  = "https://github.com/LOSTFlam/FlamFetch"
 $Raw   = "https://raw.githubusercontent.com/LOSTFlam/FlamFetch/master/flamfetch/flamfetch.py"
-$Ver   = "1.9.9"
+$Ver   = "2.0.0"
 $BinDir   = Join-Path $env:USERPROFILE ".local\bin"
 $ShareDir = Join-Path $env:USERPROFILE ".local\share\flamfetch"
 

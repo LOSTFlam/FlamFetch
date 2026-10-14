@@ -19,7 +19,7 @@
     flamfetch --no-logo        только системная информация
     flamfetch --help           помощь
 
-Версия: 1.9.9
+Версия: 2.0.0
 """
 
 import argparse
@@ -56,7 +56,7 @@ IS_LINUX = platform.system() == "Linux"
 # а не к языку, поэтому палитра одинакова в обоих режимах.
 
 CURRENT_LANG = "en"
-VERSION = "1.9.9"        # версия синхронизируется с PKGBUILD/install.sh
+VERSION = "2.0.0"        # версия синхронизируется с PKGBUILD/install.sh
 
 
 def T(text: str) -> str:
@@ -466,6 +466,28 @@ def beat(frame: int, h: float = 1.0) -> float:
     2.0, 3.0, 4.0 (ТОЛЬКО кратные базе!) — всё бьётся в унисон,
     период каждой кратен MASTER_PERIOD."""
     return frame * TEMPO * h
+
+
+# ============================================================ утилиты запуска
+#
+# _run/_read — базовые помощники, нужны САМИМ ПЕРВЫМИ: они используются
+# на уровне модуля (load_theme при импорте), поэтому определяются до
+# всего остального. Иначе на системах без GTK-конфигов (Windows)
+# импорт падал с NameError.
+
+def _run(cmd: list[str]) -> str | None:
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _read(path: str) -> str | None:
+    try:
+        return Path(path).read_text().strip()
+    except Exception:
+        return None
 
 
 # ============================================================ тема пользователя
@@ -1371,21 +1393,6 @@ def text_to_banner(text: str) -> list[str]:
 
 
 # ============================================================ системная инфа
-
-def _run(cmd: list[str]) -> str | None:
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        return out.stdout.strip() or None
-    except Exception:
-        return None
-
-
-def _read(path: str) -> str | None:
-    try:
-        return Path(path).read_text().strip()
-    except Exception:
-        return None
-
 
 def get_host() -> tuple[str, str]:
     # ---- Windows ----
